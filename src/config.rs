@@ -45,6 +45,19 @@ pub struct Config {
     /// "panel" (the full window). Unset = from `[window] compact` (v4 files). Switched from the menu.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mode: Option<UiMode>,
+    /// Flight recorder: keep the last `blackbox_minutes` of readings on disk (fixed-size files in
+    /// %LOCALAPPDATA%\Tachyon\blackbox) so a crash or unexpected restart can be explained afterwards.
+    pub blackbox: bool,
+    pub blackbox_minutes: u32,
+    /// Record finished render jobs and GPU-busy sessions in %LOCALAPPDATA%\Tachyon\history.
+    pub history: bool,
+    /// Electricity price per kWh, to show what a job cost. Off when unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub price_per_kwh: Option<f64>,
+    /// Currency label for `price_per_kwh` (for example "EUR" or "£").
+    pub currency: String,
+    /// Let local AI agents read Tachyon's live state through `tachyon mcp` (read-only, this PC only).
+    pub agent_api: bool,
     pub gpu: GpuThresholds,
     pub window: WindowCfg,
     /// "Who is using the GPU": first matching rule wins; unmatched processes are "Other".
@@ -408,6 +421,12 @@ impl Default for Config {
             process_hide: default_process_hide(),
             glass: GlassMode::Auto,
             mode: None,
+            blackbox: true,
+            blackbox_minutes: 15,
+            history: true,
+            price_per_kwh: None,
+            currency: "EUR".into(),
+            agent_api: false,
             gpu: GpuThresholds::default(),
             window: WindowCfg::default(),
             process_rules: default_process_rules(),
@@ -516,6 +535,29 @@ impl GpuThresholds {
     }
 }
 
+/// Tachyon's own folder for the flight recorder, history and exports: `TACHYON_DATA_DIR` if set,
+/// else `%LOCALAPPDATA%\Tachyon` (on other systems `$XDG_DATA_HOME/tachyon` or `~/.local/share/tachyon`).
+pub fn data_dir() -> Option<PathBuf> {
+    if let Some(d) = std::env::var_os("TACHYON_DATA_DIR").filter(|d| !d.is_empty()) {
+        return Some(PathBuf::from(d));
+    }
+    if cfg!(windows) {
+        return std::env::var_os("LOCALAPPDATA").filter(|d| !d.is_empty()).map(|d| PathBuf::from(d).join("Tachyon"));
+    }
+    std::env::var_os("XDG_DATA_HOME")
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local").join("share")))
+        .map(|d| d.join("tachyon"))
+}
+
+impl Config {
+    /// Electricity price and currency, when set.
+    pub fn price(&self) -> Option<(f64, String)> {
+        self.price_per_kwh.filter(|p| p.is_finite() && *p > 0.0).map(|p| (p, self.currency.clone()))
+    }
+}
+
 /// Settings file next to the running exe: tachyon.toml, or a legacy rig_monitor.toml when only that exists.
 pub fn config_path() -> PathBuf {
     let dir = std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf)).unwrap_or_else(|| PathBuf::from("."));
@@ -533,9 +575,11 @@ pub const HEADER: &str = "# Tachyon settings. Edit and restart Tachyon.\n\
 # render_roots = [] keeps it a pure GPU monitor. [window] is updated automatically on exit.\n\
 # Set util_band_low/util_band_high under [gpu] to colour GPU load by a target band.\n\
 # glass = \"tint\" (default look), \"blur\" (experimental desktop blur) or \"auto\".\n\
-# mode = \"island\", \"companion\" (Hex) or \"panel\" picks how Tachyon starts (also in the right-click menu).\n";
+# mode = \"island\", \"companion\" (Hex) or \"panel\" picks how Tachyon starts (also in the right-click menu).\n\
+# blackbox and history keep their files in %LOCALAPPDATA%\\Tachyon. Nothing leaves this PC.\n\
+# price_per_kwh = 0.30 shows what each job cost. agent_api = true lets local AI agents read the state (tachyon mcp).\n";
 
-/// Load the config; if the file is missing, write the defaults (the only file this app ever writes).
+/// Load the config; if the file is missing, write the defaults.
 /// Returns the config plus an optional warning to show in the UI.
 pub fn load_or_create(path: &Path) -> (Config, Option<String>) {
     match std::fs::read_to_string(path) {
@@ -609,7 +653,7 @@ pub fn save_mode(path: &Path, m: UiMode) {
     }
 }
 
-/// Persist window state (best effort; this toml is the only file the app writes).
+/// Persist window state (best effort).
 pub fn save_window(path: &Path, w: &WindowCfg) {
     let text = std::fs::read_to_string(path).unwrap_or_else(|_| HEADER.to_string());
     if let Ok(new) = with_window(&text, w) {
@@ -633,6 +677,13 @@ mod tests {
         assert_eq!(p.gpu.util_band_high, None);
         // no render roots by default (pure GPU monitor)
         assert!(p.render_roots.is_empty());
+        // 1.0 keys: recorder and history on, agent API and prices off
+        assert!(p.blackbox && p.history && !p.agent_api);
+        assert_eq!((p.blackbox_minutes, p.price()), (15, None));
+        let q: Config = toml::from_str("price_per_kwh = 0.3\ncurrency = \"£\"\nagent_api = true\n").unwrap();
+        assert_eq!(q.price(), Some((0.3, "£".to_string())));
+        assert!(q.agent_api);
+        assert!(!s.contains("price_per_kwh"), "unset price is not written");
     }
 
     #[test]
