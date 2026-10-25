@@ -2108,6 +2108,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 a.remember_geometry();
             }
             config::save_window(&a.path, &a.cfg.window);
+            a.s.close();
             if let Some(mut c) = a.comp.take() {
                 c.destroy();
             }
@@ -2117,6 +2118,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         WM_ENDSESSION if wp != 0 => {
             a.remember_geometry();
             config::save_window(&a.path, &a.cfg.window);
+            a.s.close();
         }
         WM_DESTROY => {
             KillTimer(hwnd, 1);

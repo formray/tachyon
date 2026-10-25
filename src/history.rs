@@ -268,6 +268,10 @@ pub struct LiveJob {
 }
 
 impl JobTracker {
+    pub fn with_price(price: Option<(f64, String)>) -> Self {
+        JobTracker { price, ..Default::default() }
+    }
+
     /// One sample. `render` is the current render job (name, fps), `kind` the bottleneck verdict.
     pub fn push(&mut self, s: &Sample, render: Option<(&str, Option<f64>)>, kind: Option<Kind>) -> Option<JobRecord> {
         let dt = self.last_ms.map_or(1.0, |l| ((s.t_ms - l) as f64 / 1000.0).clamp(0.0, 5.0));

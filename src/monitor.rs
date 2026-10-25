@@ -124,6 +124,8 @@ pub struct Snapshot {
     pub ticks: u64,
     /// Milliseconds spent inside the last poll (diagnostics).
     pub poll_cost_ms: f64,
+    /// Bottleneck, VRAM forecast, crash report and jobs.
+    pub insights: crate::insight::Insights,
 }
 
 /// Render-panel rule: only when render roots are configured AND a log there was written
@@ -267,11 +269,14 @@ pub struct Sampler {
     pub snap: Snapshot,
     /// Selected GPU index (the UI writes this).
     pub selected: u32,
+    pub engine: crate::insight::Engine,
 }
 
 impl Sampler {
     pub fn new(cfg: Config) -> Self {
         let sel = cfg.gpu_index;
+        let mut snap = Snapshot { selected: sel, ..Default::default() };
+        let engine = crate::insight::Engine::new(&cfg, crate::config::data_dir(), crate::telemetry::now_ms(), &mut snap.insights);
         Self {
             cfg,
             start: Instant::now(),
@@ -283,9 +288,15 @@ impl Sampler {
             ptable: Default::default(),
             ptable_at: None,
             cmdlines: HashMap::new(),
-            snap: Snapshot { selected: sel, ..Default::default() },
+            snap,
             selected: sel,
+            engine,
         }
+    }
+
+    /// Clean exit: record a running job and mark the flight recorder session clean.
+    pub fn close(&mut self) {
+        self.engine.close(crate::telemetry::now_ms(), &mut self.snap.insights);
     }
 
     pub fn tick(&mut self) {
@@ -352,6 +363,8 @@ impl Sampler {
         s.sample = sample;
         s.procs = procs;
         s.render = render;
+        let job = s.render.as_ref().map(|r| (r.job.as_str(), r.fps));
+        self.engine.tick(s.sample.as_ref(), s.procs.as_deref(), job, crate::telemetry::now_ms(), &mut s.insights);
         s.uptime = t;
         s.ticks += 1;
         s.poll_cost_ms = t0.elapsed().as_secs_f64() * 1000.0;
