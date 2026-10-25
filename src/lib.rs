@@ -8,6 +8,7 @@ pub mod explain;
 pub mod forecast;
 pub mod glass;
 pub mod hex;
+pub mod history;
 pub mod monitor;
 pub mod nvml;
 pub mod parse;
