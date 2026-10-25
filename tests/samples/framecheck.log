@@ -1,0 +1,2 @@
+2026-10-23T09:26:41 Demo_ClipA_4K_mezz.mp4 rc=2 FRAMECOUNT 7153 != expected 7155
+2026-10-23T10:17:37 Demo_ClipA_4K_mezz_r3.mp4 rc=0 {"video": "C:\\x\\Demo_ClipA_4K_mezz_r3.mp4", "frames": 7155, "bad": 0}

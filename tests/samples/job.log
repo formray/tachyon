@@ -1,0 +1,20 @@
+> C:\tools\venv\Scripts\python.exe C:\work\projects\demo4k/run/prepare.py
+loading model
+
+  0%|          | 0/1 [00:00<?, ?it/s]
+100%|##########| 1/1 [00:01<00:00,  1.13s/it]
+ 50%|#####     | 1/2 [00:00<00:00,  1.40it/s]
+step A 78 3.2
+STEP A OK
+step B 8 440 0.7
+step C 267 0.024
+PREP DONE
+> C:\tools\venv\Scripts\python.exe C:\work\projects\demo4k/run/stage2.py
+keyframes [0, 44, 63, 82, 116, 135]
+windows [(44, 63), (116, 135), (220, 235)]
+> ffmpeg -v error -y -f concat -safe 0 -i pre_list.txt -c copy pre.mp4
+> C:\tools/ffglitch\ffedit.exe -v error -y -i a.m4v -f mv -s mv.js -o b.m4v
+frame=   70 fps=0.0 size=N/A time=00:00:02.87  speed=5.53x    
+frame=  143 fps=140 size=N/A time=00:00:05.91  speed=5.79x    
+frame=  884 fps= 83 size=N/A time=00:00:36.79  speed=3.44x    
+frame=  942 fps= 84 size=N/A time=00:00:39.20  speed= 3.5x    

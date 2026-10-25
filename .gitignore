@@ -1,0 +1,8 @@
+/target
+/dist
+/dist_oss
+*.exe
+*.dll
+*.zip
+tachyon.toml
+rig_monitor.toml

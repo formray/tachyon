@@ -1,0 +1,26 @@
+# Example settings for a render machine. Copy next to tachyon.exe as tachyon.toml.
+# Anything left out uses the built-in defaults. [window] is updated automatically on exit.
+poll_ms = 1000
+render_roots = [
+    'C:\work\projects',
+    'C:\work\renders',
+]
+render_visible_secs = 120
+process_refresh_secs = 4
+process_cmdline = false
+glass = "auto"                # "tint" (darker glass, works everywhere), "blur" (experimental desktop blur) or "auto"
+mode = "island"               # "island", "companion" (Hex) or "panel"; also switchable from the right-click menu
+
+# Labels for parallel chunk logs (r_<start>.log, p_<start>.log)
+[stage_names]
+r = "stage A render"
+p = "stage C post"
+
+[gpu]
+util_band_low = 77            # cyan inside the band, amber above it
+util_band_high = 82
+util_below_band_amber = true  # below the band is amber too, but only while a render is active
+temp_amber_c = 80
+temp_red_c = 83
+vram_amber_mb = 14500
+vram_red_mb = 15600

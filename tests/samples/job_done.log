@@ -1,0 +1,8 @@
+frame= 1413 fps= 75 size=N/A time=00:00:58.83  speed=3.11x    
+frame= 1428 fps= 75 Lsize=N/A time=00:00:59.45  speed=3.12x    
+> C:\tools\venv\Scripts\python.exe C:\work\projects\demo4k/run/effect.py b.m4v c.m4v ops.json
+frames 1428 I 60 P 1368
+c.m4v frames 1428 of 1428
+> ffmpeg -v error -y -fflags +genpts -r 24 -i c.m4v -frames:v 1428 -c:v libx264 -preset veryfast -crf 6 -g 24 -pix_fmt yuv420p inter.mp4
+> ffmpeg -v error -y -f concat -safe 0 -i v_list.txt -c copy v.mp4
+{'frames': 1428, 'check': 'ok'}

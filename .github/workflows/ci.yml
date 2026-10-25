@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Parsers, log discovery, config, process rules, theme contrast: plain Rust, any OS.
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --release --locked
+
+  # The Windows UI (Win32, DirectWrite, DWM), cross-compiled with MinGW as the releases are.
+  windows-gnu:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+          components: clippy
+      - run: sudo apt-get update && sudo apt-get install -y mingw-w64
+      - run: cargo clippy --release --target x86_64-pc-windows-gnu --all-targets --locked -- -D warnings
+      - run: cargo build --release --target x86_64-pc-windows-gnu --locked
+
+  # Native MSVC build and the tests on Windows itself.
+  windows-msvc:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release --locked
+      - run: cargo test --release --locked

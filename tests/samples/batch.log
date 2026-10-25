@@ -1,0 +1,25 @@
+19:55:27 start 01 169 try 1 NF=720
+20:12:21 batch start
+20:12:21 start 01x 916 try 1 NF=1428
+20:21:49 end 01x 916 try 1 exit 0 ok=True
+20:21:49 start 02x 916 try 1 NF=1420
+20:31:50 end 02x 916 try 1 exit 0 ok=True
+20:31:50 start 03x 916 try 1 NF=1424
+20:41:38 end 03x 916 try 1 exit 0 ok=True
+20:41:38 start 04x 916 try 1 NF=1420
+20:51:33 end 04x 916 try 1 exit 0 ok=True
+20:51:33 start 01 169 try 1 NF=720
+20:56:51 end 01 169 try 1 exit 0 ok=True
+20:56:51 start 02 169 try 1 NF=720
+21:06:08 end 02 169 try 1 exit 1 ok=False
+21:06:08 start 02 169 try 2 NF=720
+21:15:24 end 02 169 try 2 exit 1 ok=False
+21:15:24 start 03 169 try 1 NF=720
+21:24:39 end 03 169 try 1 exit 1 ok=False
+21:24:39 start 03 169 try 2 NF=720
+21:34:55 end 03 169 try 2 exit 1 ok=False
+21:34:55 start 04 169 try 1 NF=720
+21:45:30 end 04 169 try 1 exit 0 ok=True
+21:45:30 start 01x 169 try 1 NF=1428
+22:07:54 end 01x 169 try 1 exit 0 ok=True
+22:07:54 start 02x 169 try 1 NF=1420

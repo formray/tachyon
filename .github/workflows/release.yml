@@ -1,0 +1,48 @@
+name: Release
+
+# Push a tag like v5.1.0: builds tachyon.exe (MinGW, with icon and version info), zips it as
+# Tachyon_<tag>.zip with README.txt and the licences, and attaches both to a GitHub release.
+# The release text is the tag's section of CHANGELOG.md.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+      - run: sudo apt-get update && sudo apt-get install -y mingw-w64 zip
+      - name: Tag matches Cargo.toml
+        run: |
+          v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          test "v$v" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME != Cargo version $v"; exit 1; }
+      - run: cargo test --release --locked
+      - run: cargo build --release --target x86_64-pc-windows-gnu --locked
+      - name: Package
+        run: |
+          mkdir -p out/Tachyon
+          cp target/x86_64-pc-windows-gnu/release/tachyon.exe out/tachyon.exe
+          cp target/x86_64-pc-windows-gnu/release/tachyon.exe out/Tachyon/
+          cp packaging/README.txt LICENSE-MIT LICENSE-APACHE out/Tachyon/
+          (cd out && zip -r -X "Tachyon_${GITHUB_REF_NAME}.zip" Tachyon)
+          (cd out && sha256sum tachyon.exe "Tachyon_${GITHUB_REF_NAME}.zip" > SHA256SUMS.txt && cat SHA256SUMS.txt)
+          awk -v t="## ${GITHUB_REF_NAME}" '$0==t{f=1;next} /^## /{f=0} f' CHANGELOG.md > out/notes.md
+          test -s out/notes.md || echo "Tachyon ${GITHUB_REF_NAME}" > out/notes.md
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: Tachyon ${{ github.ref_name }}
+          body_path: out/notes.md
+          files: |
+            out/tachyon.exe
+            out/Tachyon_${{ github.ref_name }}.zip
+            out/SHA256SUMS.txt
