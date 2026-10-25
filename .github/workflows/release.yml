@@ -1,6 +1,6 @@
 name: Release
 
-# Push a tag like v5.1.0: builds tachyon.exe (MinGW, with icon and version info), zips it as
+# Push a tag like v1.0.0: builds tachyon.exe (MinGW, with icon and version info), zips it as
 # Tachyon_<tag>.zip with README.txt and the licences, and attaches both to a GitHub release.
 # The release text is the tag's section of CHANGELOG.md.
 on:

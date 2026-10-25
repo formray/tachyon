@@ -1,10 +1,18 @@
 # Changelog
 
-## v5.1.1
+## v1.0.0
+
+Tachyon 1.0 is the first release. It supersedes the 5.x preview builds: those numbers were development iterations, and versioning restarts here.
+
+## Previews
+
+Preview builds before 1.0. Their tags and downloads stay on GitHub for reference.
+
+### v5.1.1
 
 - Fixed: on Windows a render log still held open by its writer could look stale to the scan; its last-write time is now read from the file itself, and the scan tests no longer depend on Windows keeping file times when copying (the failed v5.1.0 Windows CI run).
 
-## v5.1.0
+### v5.1.0
 
 Tachyon 5.1 brings **Hex**, a desktop companion, alongside the new **Aurora** look.
 
