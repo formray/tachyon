@@ -65,9 +65,8 @@ pub fn parse_proc_stat(text: &str) -> CoreTimes {
 
 /// Parse /proc/meminfo (kB values).
 pub fn parse_meminfo(text: &str) -> Option<MemInfo> {
-    let get = |k: &str| {
-        text.lines().find(|l| l.starts_with(k)).and_then(|l| l.split_whitespace().nth(1)).and_then(|v| v.parse::<f64>().ok())
-    };
+    let get =
+        |k: &str| text.lines().find(|l| l.starts_with(k)).and_then(|l| l.split_whitespace().nth(1)).and_then(|v| v.parse::<f64>().ok());
     let total = get("MemTotal:")?;
     let avail = get("MemAvailable:")?;
     Some(MemInfo {

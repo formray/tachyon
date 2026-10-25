@@ -3,6 +3,7 @@
 //! Everything here is read-only with respect to the render pipeline.
 pub mod aurora;
 pub mod config;
+pub mod explain;
 pub mod glass;
 pub mod hex;
 pub mod monitor;
