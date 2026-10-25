@@ -3,6 +3,7 @@
 //! Everything here is read-only with respect to the render pipeline.
 pub mod aurora;
 pub mod config;
+pub mod events;
 pub mod explain;
 pub mod forecast;
 pub mod glass;
@@ -13,6 +14,7 @@ pub mod parse;
 pub mod png;
 pub mod procinfo;
 pub mod recorder;
+pub mod report;
 pub mod scan;
 pub mod sysinfo;
 pub mod telemetry;

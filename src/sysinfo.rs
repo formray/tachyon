@@ -122,6 +122,20 @@ impl SysMeter {
     }
 }
 
+/// When the PC last started (Unix milliseconds), from the uptime counter.
+#[cfg(windows)]
+pub fn boot_time_ms() -> Option<i64> {
+    let up = unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount64() } as i64;
+    Some(crate::telemetry::now_ms() - up)
+}
+
+#[cfg(not(windows))]
+pub fn boot_time_ms() -> Option<i64> {
+    let t = std::fs::read_to_string("/proc/uptime").ok()?;
+    let up: f64 = t.split_whitespace().next()?.parse().ok()?;
+    Some(crate::telemetry::now_ms() - (up * 1000.0) as i64)
+}
+
 #[cfg(windows)]
 fn read_mem() -> Option<MemInfo> {
     win::mem()
