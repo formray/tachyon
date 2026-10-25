@@ -95,6 +95,9 @@ struct Api {
     cmp_procs_v1: Option<FnProcV1>,
     proc_util: Option<FnProcUtil>,
     pid_name: Option<FnPidName>,
+    energy: Option<FnU64>,
+    link_gen: Option<FnU32>,
+    link_width: Option<FnU32>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -129,6 +132,11 @@ pub struct GpuSample {
     pub pcie_rx_mbs: Option<f64>,
     pub pcie_tx_mbs: Option<f64>,
     pub throttle: Option<u64>,
+    /// Total energy since the driver loaded, millijoules (Volta and newer).
+    pub energy_mj: Option<u64>,
+    /// Current PCIe link generation and width (they drop at idle to save power).
+    pub pcie_gen: Option<u32>,
+    pub pcie_width: Option<u32>,
     /// None = process listing not supported.
     pub procs: Option<Vec<ProcInfo>>,
 }
@@ -235,6 +243,9 @@ impl Nvml {
             cmp_procs_v1: sym!("nvmlDeviceGetComputeRunningProcesses"),
             proc_util: sym!("nvmlDeviceGetProcessUtilization"),
             pid_name: sym!("nvmlSystemGetProcessName"),
+            energy: sym!("nvmlDeviceGetTotalEnergyConsumption"),
+            link_gen: sym!("nvmlDeviceGetCurrPcieLinkGeneration"),
+            link_width: sym!("nvmlDeviceGetCurrPcieLinkWidth"),
         };
         let init: FnV = sym!("nvmlInit_v2", "nvmlInit").ok_or("nvmlInit missing")?;
         let r = unsafe { init() };
@@ -400,6 +411,24 @@ impl Nvml {
                 let mut m = 0;
                 if self.try_call(idx, "thr", || f(d, &mut m)) {
                     s.throttle = Some(m);
+                }
+            }
+            if let Some(f) = a.energy {
+                let mut e = 0;
+                if self.try_call(idx, "energy", || f(d, &mut e)) {
+                    s.energy_mj = Some(e);
+                }
+            }
+            if let Some(f) = a.link_gen {
+                let mut v = 0;
+                if self.try_call(idx, "lgen", || f(d, &mut v)) {
+                    s.pcie_gen = Some(v);
+                }
+            }
+            if let Some(f) = a.link_width {
+                let mut v = 0;
+                if self.try_call(idx, "lwid", || f(d, &mut v)) {
+                    s.pcie_width = Some(v);
                 }
             }
         }

@@ -11,5 +11,7 @@ pub mod parse;
 pub mod png;
 pub mod procinfo;
 pub mod scan;
+pub mod sysinfo;
+pub mod telemetry;
 pub mod theme;
 pub mod voice;
