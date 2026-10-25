@@ -4,6 +4,7 @@
 pub mod aurora;
 pub mod config;
 pub mod explain;
+pub mod forecast;
 pub mod glass;
 pub mod hex;
 pub mod monitor;
