@@ -270,12 +270,14 @@ pub struct Sampler {
     /// Selected GPU index (the UI writes this).
     pub selected: u32,
     pub engine: crate::insight::Engine,
+    agent: Option<crate::agent::Publisher>,
 }
 
 impl Sampler {
     pub fn new(cfg: Config) -> Self {
         let sel = cfg.gpu_index;
         let mut snap = Snapshot { selected: sel, ..Default::default() };
+        let agent = cfg.agent_api.then(crate::agent::Publisher::new);
         let engine = crate::insight::Engine::new(&cfg, crate::config::data_dir(), crate::telemetry::now_ms(), &mut snap.insights);
         Self {
             cfg,
@@ -288,6 +290,7 @@ impl Sampler {
             ptable: Default::default(),
             ptable_at: None,
             cmdlines: HashMap::new(),
+            agent,
             snap,
             selected: sel,
             engine,
@@ -367,6 +370,9 @@ impl Sampler {
         self.engine.tick(s.sample.as_ref(), s.procs.as_deref(), job, crate::telemetry::now_ms(), &mut s.insights);
         s.uptime = t;
         s.ticks += 1;
+        if let Some(a) = self.agent.as_mut() {
+            a.tick(s);
+        }
         s.poll_cost_ms = t0.elapsed().as_secs_f64() * 1000.0;
     }
 }

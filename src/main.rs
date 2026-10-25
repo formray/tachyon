@@ -8,8 +8,23 @@ mod gui;
 #[cfg(windows)]
 mod present;
 
+/// `tachyon mcp`: the read-only MCP server for local AI agents (stdin/stdout, no window).
+fn mcp_requested() -> bool {
+    std::env::args().nth(1).is_some_and(|a| a.eq_ignore_ascii_case("mcp"))
+}
+
+fn run_mcp() {
+    let path = tachyon::config::config_path();
+    // read the settings without creating a file
+    let cfg = std::fs::read_to_string(&path).ok().and_then(|t| toml::from_str(&t).ok()).unwrap_or_default();
+    tachyon::mcp::serve(cfg);
+}
+
 #[cfg(windows)]
 fn main() {
+    if mcp_requested() {
+        return run_mcp();
+    }
     gui::run();
 }
 
@@ -17,6 +32,9 @@ fn main() {
 #[cfg(not(windows))]
 fn main() {
     use tachyon::{config, nvml, scan};
+    if mcp_requested() {
+        return run_mcp();
+    }
     let mut cfg = config::Config::default();
     let args: Vec<String> = std::env::args().skip(1).collect();
     if !args.is_empty() {

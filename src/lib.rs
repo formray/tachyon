@@ -1,6 +1,7 @@
 //! Tachyon library: config, log parsing, log discovery, NVML sampling, and the host-independent
 //! parts of the UI (Aurora colour field, software glass for layered windows).
 //! Everything here is read-only with respect to the render pipeline.
+pub mod agent;
 pub mod aurora;
 pub mod config;
 pub mod events;
@@ -10,6 +11,7 @@ pub mod glass;
 pub mod hex;
 pub mod history;
 pub mod insight;
+pub mod mcp;
 pub mod monitor;
 pub mod nvml;
 pub mod parse;
