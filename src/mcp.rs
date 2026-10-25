@@ -207,7 +207,10 @@ pub fn handle(msg: &Value, src: &mut dyn Source) -> Option<Value> {
         "tools/call" => {
             let name = msg["params"]["name"].as_str().unwrap_or("");
             let args = msg["params"].get("arguments").cloned().unwrap_or(json!({}));
-            match call(name, &args, src) {
+            match call(name, &args, src).map(|mut v| {
+                crate::agent::tidy(&mut v);
+                v
+            }) {
                 Ok(v) => ok(
                     &id,
                     json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&v).unwrap_or_default() }], "structuredContent": v, "isError": false }),

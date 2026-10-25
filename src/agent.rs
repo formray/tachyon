@@ -11,8 +11,31 @@ pub const MAP_SIZE: usize = 64 * 1024;
 const MAGIC: u32 = 0x5441_4753; // "TAGS"
 const HDR: usize = 16;
 
+/// Round non-integer numbers to two decimals (f32 readings would otherwise show as
+/// 324.8659973144531), recursively.
+pub fn tidy(v: &mut Value) {
+    match v {
+        Value::Number(n) if n.is_f64() => {
+            if let Some(f) = n.as_f64().map(|f| (f * 100.0).round() / 100.0)
+                && let Some(r) = serde_json::Number::from_f64(f)
+            {
+                *n = r;
+            }
+        }
+        Value::Array(a) => a.iter_mut().for_each(tidy),
+        Value::Object(o) => o.values_mut().for_each(tidy),
+        _ => {}
+    }
+}
+
 /// The status an agent sees (also used by the standalone fallback).
 pub fn status(snap: &Snapshot, source: &str) -> Value {
+    let mut v = status_raw(snap, source);
+    tidy(&mut v);
+    v
+}
+
+fn status_raw(snap: &Snapshot, source: &str) -> Value {
     let i = &snap.insights;
     let now = crate::telemetry::now_ms();
     let gpu = snap.gpus.get(snap.selected as usize).cloned();
@@ -243,5 +266,8 @@ mod tests {
         }
         assert_eq!(v["gpu"]["name"], "NVIDIA GeForce RTX 5080");
         assert_eq!(v["reading"]["util"], 42);
+        let mut x = json!({ "a": 324.8659973144531, "b": [0.3499999940395355, 7], "c": { "d": 1.0 } });
+        tidy(&mut x);
+        assert_eq!(x, json!({ "a": 324.87, "b": [0.35, 7], "c": { "d": 1.0 } }));
     }
 }
