@@ -81,13 +81,31 @@ pub(super) struct Companion {
     b_surf: Option<Surface>,
     b_geo: Option<Geometry>,
     b_fg: Vec<u8>,
-    b_hits: Vec<R>,
+    b_hits: Vec<(R, Link)>,
+    /// lines that replace the usual ones until the bubble closes: the crash announcement or
+    /// the answer to "Why is it slow?"
+    b_special: Option<(Special, Vec<tachyon::voice::Line>)>,
     /// bubble shape rect in screen px, and its padding
     b_shape: RECT,
     b_pad: i32,
     b_origin: POINT,
     b_last_hover: Instant,
     b_left: bool,
+}
+
+/// Links in the bubble's bottom row.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Link {
+    Panel,
+    Report,
+    Why,
+    Back,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Special {
+    Announce,
+    Why,
 }
 
 /// True when a fullscreen app (game, video, presentation) is in front on the sprite's monitor.
@@ -198,6 +216,7 @@ impl Companion {
             b_geo: None,
             b_fg: vec![],
             b_hits: vec![],
+            b_special: None,
             b_shape: std::mem::zeroed(),
             b_pad: 0,
             b_origin: POINT { x: 0, y: 0 },
@@ -407,6 +426,7 @@ impl Companion {
             return;
         }
         self.b_open = false;
+        self.b_special = None;
         KillTimer(self.hwnd, T_BUBBLE_IDLE);
         self.b_anim = Some((Instant::now(), false));
         SetTimer(self.hwnd, T_BUBBLE_ANIM, 15, None);
@@ -452,9 +472,18 @@ impl Companion {
     pub unsafe fn render_bubble(&mut self, ctx: &mut BubbleCtx) {
         let k = self.at.scale.max(ctx.scale);
         let (fa, fb) = hex::field(self.anim.state, &self.inp);
-        let lines = bubble_lines(ctx.snap, ctx.cfg);
+        let lines = match &self.b_special {
+            Some((_, l)) => spans_of(l.clone()),
+            None => bubble_lines(ctx.snap, ctx.cfg),
+        };
         let chips = bubble_chips(ctx.snap, ctx.cfg);
-        let footer = bubble_footer(ctx.snap);
+        // bottom row: (left text or link, right link)
+        let (left_link, right_link) = match self.b_special.as_ref().map(|s| s.0) {
+            Some(Special::Announce) => (None, (Link::Report, "Open report ›")),
+            Some(Special::Why) => (Some((Link::Back, "‹ Back")), (Link::Panel, "Open panel ›")),
+            None => (asks_why(ctx.snap).then_some((Link::Why, "Why is it slow? ›")), (Link::Panel, "Open panel ›")),
+        };
+        let footer = bubble_footer(ctx.snap).or_else(|| self.b_special.as_ref().map(|_| String::new()));
         // width: 380 (300..420), grows only for longer lines
         let mut need = 0.0f32;
         for (spans, _) in &lines {
@@ -615,13 +644,23 @@ impl Companion {
             if let Some(f) = &footer {
                 y += 12.0;
                 let fb_ = y + 11.5;
-                let link = "Open panel ›";
+                let (rl, link) = right_link;
                 let lw = g.measure(link, Face::SansSemi, 11.5).0;
-                let left = g.fit(f, Face::SansSemi, 11.5, inner - lw - 12.0);
-                g.text(&left, x0, fb_, Face::SansSemi, 11.5, FOOT, H::L, V::Base);
+                match left_link {
+                    Some((ll, label)) => {
+                        let r = g.text(label, x0, fb_, Face::SansSemi, 11.5, HIGHLIGHT, H::L, V::Base);
+                        if pass == Pass::Dynamic {
+                            hits.push((r.grow(4.0), ll));
+                        }
+                    }
+                    None => {
+                        let left = g.fit(f, Face::SansSemi, 11.5, inner - lw - 12.0);
+                        g.text(&left, x0, fb_, Face::SansSemi, 11.5, FOOT, H::L, V::Base);
+                    }
+                }
                 let lr = g.text(link, x0 + inner, fb_, Face::SansSemi, 11.5, HIGHLIGHT, H::Rt, V::Base);
                 if pass == Pass::Dynamic {
-                    hits.push(lr.grow(4.0));
+                    hits.push((lr.grow(4.0), rl));
                 }
             }
         }
@@ -637,13 +676,13 @@ impl Companion {
         }
     }
 
-    /// Bubble-local logical point -> "Open panel" hit?
-    fn bubble_link_at(&self, cx: i32, cy: i32) -> bool {
+    /// Bubble-local point -> the link under it.
+    fn bubble_link_at(&self, cx: i32, cy: i32) -> Option<Link> {
         let k = self.at.scale;
         let shape_x = self.b_shape.left - self.b_origin.x;
         let shape_y = self.b_shape.top - self.b_origin.y;
         let (x, y) = ((cx - shape_x) as f32 / k, (cy - shape_y) as f32 / k);
-        self.b_hits.iter().any(|r| r.contains(x, y))
+        self.b_hits.iter().find(|(r, _)| r.contains(x, y)).map(|(_, l)| *l)
     }
 }
 
@@ -700,8 +739,18 @@ fn gb(mb: f64) -> String {
 
 /// The spoken lines (tachyon::voice) with this window's faces and colours.
 fn bubble_lines(snap: &Snapshot, cfg: &Config) -> Vec<(Vec<Span>, bool)> {
+    spans_of(tachyon::voice::lines(snap, cfg, chrono::Local::now()))
+}
+
+/// Offer "Why is it slow?" while the GPU is working or something is holding it back.
+fn asks_why(snap: &Snapshot) -> bool {
+    snap.sample.as_ref().and_then(|g| g.util_pct).is_some_and(|u| u >= 30)
+        || snap.insights.bottleneck.as_ref().is_some_and(|v| v.kind.is_problem())
+}
+
+fn spans_of(lines: Vec<tachyon::voice::Line>) -> Vec<(Vec<Span>, bool)> {
     use tachyon::voice::Tone;
-    tachyon::voice::lines(snap, cfg, chrono::Local::now())
+    lines
         .into_iter()
         .map(|l| {
             let spans = l
@@ -870,7 +919,7 @@ unsafe extern "system" fn bubble_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: L
             let mut p: POINT = std::mem::zeroed();
             GetCursorPos(&mut p);
             ScreenToClient(hwnd, &mut p);
-            let link = a.comp.as_ref().unwrap().bubble_link_at(p.x, p.y);
+            let link = a.comp.as_ref().unwrap().bubble_link_at(p.x, p.y).is_some();
             SetCursor(LoadCursorW(null_mut(), if link { IDC_HAND } else { IDC_ARROW }));
             return 1;
         }
@@ -880,11 +929,21 @@ unsafe extern "system" fn bubble_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: L
         }
         WM_LBUTTONUP => {
             let (cx, cy) = lparam_xy(lp);
-            if a.comp.as_ref().unwrap().bubble_link_at(cx, cy) {
-                a.comp.as_mut().unwrap().close_bubble();
-                a.open_panel_from_companion();
-            } else {
-                a.comp.as_mut().unwrap().close_bubble();
+            match a.comp.as_ref().unwrap().bubble_link_at(cx, cy) {
+                Some(Link::Panel) => {
+                    a.comp.as_mut().unwrap().close_bubble();
+                    a.open_view(super::View::Main);
+                }
+                Some(Link::Report) => {
+                    a.comp.as_mut().unwrap().close_bubble();
+                    a.open_view(super::View::Report);
+                }
+                Some(Link::Why) => {
+                    let lines = tachyon::voice::why_lines(a.s.engine.why_now().as_ref());
+                    a.bubble_special(Some((Special::Why, lines)));
+                }
+                Some(Link::Back) => a.bubble_special(None),
+                None => a.comp.as_mut().unwrap().close_bubble(),
             }
             return 0;
         }
@@ -926,8 +985,38 @@ impl App {
         }
     }
 
+    /// Replace the bubble's lines (or go back to the usual ones) and redraw it.
+    pub(super) fn bubble_special(&mut self, sp: Option<(Special, Vec<tachyon::voice::Line>)>) {
+        let (c, mut ctx) = self.bubble_ctx_parts();
+        if let Some(c) = c {
+            c.b_special = sp;
+            c.b_last_hover = Instant::now();
+            unsafe {
+                if c.b_open {
+                    c.render_bubble(&mut ctx);
+                } else {
+                    c.open_bubble(&mut ctx);
+                }
+            }
+        }
+    }
+
+    /// Hex tells the user about a new crash report, once.
+    fn hex_announce(&mut self) {
+        let Some(r) = self.s.snap.insights.report.clone() else { return };
+        self.bubble_special(Some((Special::Announce, tachyon::voice::announcement_lines(&r))));
+        if let Some(c) = self.comp.as_mut() {
+            // give it longer than the usual idle time before it closes by itself
+            c.b_last_hover = Instant::now() + Duration::from_secs(20);
+        }
+        self.s.engine.mark_announced(&mut self.s.snap.insights);
+    }
+
     /// Poll tick in companion mode: sprite state/colours, and the bubble while it is open.
     pub(super) fn hex_poll(&mut self) {
+        if self.s.snap.insights.report_new {
+            self.hex_announce();
+        }
         let now = self.now_ms();
         let dump = self.dump.clone();
         let (c, mut ctx) = self.bubble_ctx_parts();
@@ -1015,6 +1104,7 @@ impl App {
             self.remember_geometry();
             config::save_window(&self.path, &self.cfg.window);
             self.main_hidden = true;
+            self.view = super::View::Main;
             ShowWindow(self.hwnd, SW_HIDE);
         }
     }

@@ -9,6 +9,7 @@
 //! 10 fps). No continuous animation.
 #![allow(clippy::too_many_arguments, unsafe_op_in_unsafe_fn)]
 mod companion;
+mod views;
 use crate::dw::{self, Dw, Face};
 use crate::present::{self, Surface};
 use std::ptr::{null, null_mut};
@@ -24,6 +25,7 @@ use tiny_skia::{
     Color, FillRule, GradientStop, LineCap, LineJoin, LinearGradient, Paint, Path, PathBuilder, PixmapMut, Point, Shader, SpreadMode,
     Stroke, Transform,
 };
+use views::View;
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Dwm::*;
 use windows_sys::Win32::Graphics::Gdi::*;
@@ -419,6 +421,11 @@ enum Btn {
     Island,
     Gpu,
     ShowAll,
+    Report,
+    History,
+    Back,
+    Export,
+    Why,
 }
 
 const PANEL_W: f32 = 480.0;
@@ -501,6 +508,13 @@ struct App {
     comp: Option<companion::Companion>,
     /// the main window is hidden (companion mode without the panel open)
     main_hidden: bool,
+    /// panel view: main, crash report or job history
+    view: View,
+    /// the bottleneck's numbers are shown under the sentence
+    show_why: bool,
+    /// finished-job counter and the jobs read for the History view
+    hist_cache: Option<(u64, Vec<tachyon::history::JobRecord>)>,
+    export_msg: Option<String>,
 }
 
 static mut APP: *mut App = null_mut();
@@ -613,6 +627,14 @@ pub fn run() {
             mode: UiMode::Panel,
             comp: None,
             main_hidden: false,
+            view: match std::env::var("TACHYON_VIEW").as_deref() {
+                Ok("report") => View::Report,
+                Ok("history") => View::History,
+                _ => View::Main,
+            },
+            show_why: false,
+            hist_cache: None,
+            export_msg: None,
         }));
         APP = a;
         let ap = &mut *a;
@@ -950,6 +972,9 @@ impl App {
         }
         self.remember_geometry();
         let to_island = !self.island();
+        if to_island {
+            self.view = View::Main;
+        }
         unsafe {
             let from = (self.shape, self.cur_radius());
             self.cfg.window.compact = to_island;
@@ -1073,6 +1098,12 @@ impl App {
             }
             if full {
                 AppendMenuW(m, MF_SEPARATOR, 0, null());
+                if self.s.snap.insights.data_dir.is_some() {
+                    AppendMenuW(m, MF_STRING, 20, wz("Crash report").as_ptr());
+                    AppendMenuW(m, MF_STRING | if self.cfg.history { 0 } else { MF_GRAYED }, 21, wz("Job history").as_ptr());
+                    AppendMenuW(m, MF_STRING | if self.cfg.blackbox { 0 } else { MF_GRAYED }, 22, wz("Export flight recorder").as_ptr());
+                    AppendMenuW(m, MF_SEPARATOR, 0, null());
+                }
                 AppendMenuW(m, MF_STRING, 3, wz("Close Tachyon").as_ptr());
             }
             SetForegroundWindow(owner);
@@ -1088,6 +1119,12 @@ impl App {
                 10 => self.set_mode(UiMode::Island),
                 11 => self.set_mode(UiMode::Companion),
                 12 => self.set_mode(UiMode::Panel),
+                20 => self.open_view(View::Report),
+                21 => self.open_view(View::History),
+                22 => {
+                    self.open_view(View::Report);
+                    self.export_blackbox();
+                }
                 c if c >= 100 => self.select_gpu((c - 100) as u32),
                 _ => {}
             }
@@ -1102,6 +1139,15 @@ impl App {
             Btn::Pin => self.toggle_pin(),
             Btn::Island => self.toggle_island(),
             Btn::ShowAll => self.toggle_show_all(),
+            Btn::Report => self.open_view(View::Report),
+            Btn::History => self.open_view(View::History),
+            Btn::Back => self.open_view(View::Main),
+            Btn::Export => self.export_blackbox(),
+            Btn::Why => {
+                self.show_why = !self.show_why;
+                self.fg_valid = false;
+                unsafe { self.frame(true) };
+            }
             Btn::Gpu => {
                 if let Some((r, _)) = self.hits.iter().find(|(_, x)| *x == Btn::Gpu) {
                     let p = POINT { x: self.shape.left + (r.x * self.scale) as i32, y: self.shape.top + (r.b() * self.scale) as i32 };
@@ -1151,6 +1197,10 @@ impl App {
         }
         if self.comp.is_some() {
             self.hex_poll();
+        }
+        if self.s.snap.insights.report_new && !self.main_hidden && !self.island() && self.anim.is_none() {
+            // the banner is on screen: Hex does not need to announce it again
+            self.s.engine.mark_announced(&mut self.s.snap.insights);
         }
         let ticks = self.s.snap.ticks;
         if ticks == 3 {
@@ -1629,6 +1679,12 @@ impl App {
             format!("{} · driver {}", gpu.unwrap_or_else(|| "no NVIDIA GPU".into()), if s.driver.is_empty() { "—" } else { &s.driver });
         let sub = g.fit(&sub, Face::Sans, 12.0, (bx - 6.0 - sx).max(40.0));
         g.stat(|g| g.text(&sub, sx, 34.0, Face::Sans, 12.0, TEXT2, H::L, V::Base));
+        if self.view != View::Main {
+            let y = if self.view == View::Report { self.draw_report_view(g, s, lw) } else { self.draw_history_view(g, s, lw) };
+            self.panel_fixed_h = y;
+            self.panel_h = (y + 18.0).ceil().max(FIELD_H + 80.0);
+            return;
+        }
         // ---- legend: load and heat with their 60 s traces
         let ly = 60.0;
         let lr = g.stat(|g| g.text("load", x0, ly + 4.0, Face::Sans, 10.5, TEXT2, H::L, V::Base));
@@ -1701,6 +1757,7 @@ impl App {
         if let Some(rv) = &s.render {
             y = render_block(g, rv, R::new(16.0, y, lw - 32.0, 0.0)) + 12.0;
         }
+        y = self.draw_insights(g, s, x0, xr, y + 4.0);
         // ---- metric list: two columns, dividers
         y += 4.0;
         let colw = (xr - x0 - 26.0) / 2.0;
