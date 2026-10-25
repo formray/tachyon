@@ -15,7 +15,7 @@ Thanks for helping. A few ground rules keep Tachyon small and trustworthy.
 3. Keep the Windows UI in plain windows-sys + tiny-skia + DirectWrite (no UI frameworks).
 4. New parsers need a small anonymised fixture in `tests/samples/` and a test. Never commit real logs with personal paths, project names or client names.
 5. For UI changes, attach a screenshot. You can make one without Windows using wine:
-   - build the fake driver: `x86_64-w64-mingw32-gcc -O2 -shared -o nvml.dll tests/fake_nvml_v3.c -lm` (add `-DFORCE_THR` to force limiters) and copy it to the prefix's `windows/system32/`;
+   - build the fake driver: `x86_64-w64-mingw32-gcc -O2 -shared -o nvml.dll tests/fake_nvml_v4.c -lm` (add `-DFORCE_THR` to force limiters) and copy it to the prefix's `windows/system32/`;
    - the scripts expect the prefix in `/tmp/tachyon-wine/wp`, `nvml.dll` and `sleeper.exe` in `/tmp/tachyon-work`, and a wallpaper made by `tests/make_wallpaper.py /tmp/tachyon-work/wall_demo.jpg`;
    - fake GPU processes: build `tests/sleeper.c`; `tests/wine.sh start` starts Xvfb, picom (so layered alpha is really blended) and copies of the sleeper inside the prefix, and writes their PIDs to `C:\rmfake\procs.txt` (`<pid> <vram_mb|-1> <G|C> <sm> <enc> <dec>` per line);
    - `tests/shots.sh <scenario>` takes screenshots (a fake render log tree goes in `/tmp/tachyon-wine/projects/demo4k`); `tests/interact.sh` and `tests/interact_hex.sh` click through island, panel, Hex and bubble with xdotool; `tests/measure.sh` measures CPU and RSS of each mode;

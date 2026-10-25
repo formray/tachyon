@@ -145,11 +145,12 @@ pub fn query(from_ms: i64, to_ms: i64, max: usize) -> Result<Vec<SysEvent>, Stri
         let xp: Vec<u16> = xpath(from_ms, to_ms).encode_utf16().chain([0]).collect();
         let rs = q(std::ptr::null_mut(), path.as_ptr(), xp.as_ptr(), EVT_QUERY_CHANNEL_PATH | EVT_QUERY_REVERSE);
         if rs.is_null() {
-            let e = std::io::Error::last_os_error();
-            return Err(if e.raw_os_error() == Some(ERROR_ACCESS_DENIED) {
-                "Windows did not allow reading the System event log".into()
-            } else {
-                format!("the System event log could not be read ({e})")
+            let code = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+            return Err(match code {
+                ERROR_ACCESS_DENIED => "Windows did not allow reading the System event log".into(),
+                // 0: no error set (wine), 50/120: not supported or not implemented
+                0 | 50 | 120 => "Windows did not answer the event log query".into(),
+                c => format!("the System event log could not be read (error {c})"),
             });
         }
         let mut out = vec![];

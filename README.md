@@ -175,7 +175,7 @@ front of its monitor.
 
 **Pending: real numbers on an RTX 5080 (Windows 11) are being collected
 and will replace this note.** Until then, every figure below comes from
-**wine 10 on Linux with a fake `nvml.dll`** ([`tests/fake_nvml_v3.c`](tests/fake_nvml_v3.c)),
+**wine 10 on Linux with a fake `nvml.dll`** ([`tests/fake_nvml_v4.c`](tests/fake_nvml_v4.c)),
 Xvfb and the picom compositor, the same fake processes for every run,
 30 s after a 22 s warm-up ([`tests/measure.sh`](tests/measure.sh)):
 

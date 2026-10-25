@@ -10,8 +10,9 @@ start)
   pgrep -f "Xvfb :77" >/dev/null || (Xvfb :77 -screen 0 1600x1000x24 +extension Composite >/dev/null 2>&1 &) ; sleep 1
   # busy wallpaper + a compositor, so layered per-pixel alpha is really blended (proves: no rectangle)
   hsetroot -fill ${WALL:-/tmp/tachyon-work/wall_demo.jpg} >/dev/null 2>&1 || true
-  pgrep -x picom >/dev/null || (picom --backend xrender --no-fading-openclose --shadow-exclude "class_g ~= '.*'" >/dev/null 2>&1 &)
-  cp $TT/nvml.dll $WINEPREFIX/drive_c/windows/system32/nvml.dll
+  # only our own compositor on :77 (other desktops on this machine run theirs)
+  pgrep -f "picom --backend xrender --no-fading-openclose" >/dev/null || (picom --backend xrender --no-fading-openclose --shadow-exclude "class_g ~= '.*'" >/dev/null 2>&1 &)
+  cp $TT/nvml.dll $WINEPREFIX/drive_c/windows/system32/nvml.dll  # built from tests/fake_nvml_v4.c
   for p in Steam/steam.exe Game/Cyberpunk2077.exe ComfyUI/ComfyUI.exe ComfyUI/python_embeded/python.exe Tools/Helper.exe \
            py/python.exe ffmpeg/ffmpeg.exe OBS/obs64.exe Chrome/chrome.exe Win/dwm.exe; do cp $TT/sleeper.exe $F/$p; done
   rm -f $F/pids/*
@@ -31,5 +32,5 @@ procs)
      "$(pid obs) -1 G 3 41 18" "$(pid chrome) -1 G 6 0 4" "$(pid ffmpeg) 296 G 2 0 26" "$(pid dwm) -1 G 0 0 0" \
      "$(pid steam) -1 G 0 0 0" "$(pid helper) -1 G 1 0 0" > $F/procs.txt
   cat $F/procs.txt ;;
-stop) wineserver -k || true; pkill -x picom || true; pkill -f "Xvfb :77" || true ;;
+stop) wineserver -k || true; pkill -f "picom --backend xrender --no-fading-openclose" || true; pkill -f "Xvfb :77" || true ;;
 esac

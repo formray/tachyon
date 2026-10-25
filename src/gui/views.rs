@@ -106,7 +106,7 @@ impl App {
             let row = R::new(x0 - 8.0, y, w + 16.0, 30.0);
             g.stat(|g| g.fill_rrect(row, 15.0, AMBER, 0.16));
             let lr = self.link(g, "Open report ›", xr - 4.0, y + 19.5, Btn::Report);
-            let head = g.fit(&r.headline, Face::SansSemi, 12.5, lr.x - x0 - 14.0);
+            let head = g.fit(&r.headline, Face::SansSemi, 12.5, lr.x - x0 - 26.0);
             g.stat(|g| {
                 g.dot(x0 + 3.0, y + 15.0, 3.5, AMBER, 1.0);
                 g.text(&head, x0 + 13.0, y + 19.5, Face::SansSemi, 12.5, T_AMBER, H::L, V::Base)

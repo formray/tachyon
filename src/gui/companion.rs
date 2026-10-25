@@ -492,10 +492,11 @@ impl Companion {
         }
         let bw = need.max(BUBBLE_W).clamp(300.0, 420.0);
         let inner = bw - 36.0;
-        // wrap each line into at most 2 rows
+        // wrap each line into at most 2 rows (3 for the announcement and the "why" answer)
+        let max_rows = if self.b_special.is_some() { 3 } else { 2 };
         let mut rows: Vec<(Vec<(String, Face, Rgb, f32)>, bool, bool)> = vec![]; // (words with x, first row of line, render line)
         for (spans, is_render) in &lines {
-            let wrapped = wrap(ctx.dw.as_deref_mut(), spans, inner, k);
+            let wrapped = wrap(ctx.dw.as_deref_mut(), spans, inner, k, max_rows);
             let nrows = wrapped.len();
             for (i, r) in wrapped.into_iter().enumerate() {
                 rows.push((r, i == 0, *is_render && i + 1 == nrows));
@@ -703,8 +704,8 @@ fn mt(dw: Option<&mut Dw>, s: &str, face: Face, size: f32, track: f32, k: f32) -
     }
 }
 
-/// Greedy word wrap over styled spans: at most 2 rows, the rest ellipsised.
-fn wrap(mut dw: Option<&mut Dw>, spans: &[Span], maxw: f32, k: f32) -> Vec<Vec<(String, Face, Rgb, f32)>> {
+/// Greedy word wrap over styled spans: at most `max_rows` rows, the rest ellipsised.
+fn wrap(mut dw: Option<&mut Dw>, spans: &[Span], maxw: f32, k: f32, max_rows: usize) -> Vec<Vec<(String, Face, Rgb, f32)>> {
     let mut rows: Vec<Vec<(String, Face, Rgb, f32)>> = vec![vec![]];
     let mut x = 0.0f32;
     for (text, face, c) in spans {
@@ -717,8 +718,8 @@ fn wrap(mut dw: Option<&mut Dw>, spans: &[Span], maxw: f32, k: f32) -> Vec<Vec<(
             let ww = mt(dw.as_deref_mut(), word, *face, 15.0, 0.0, k);
             let trimmed = mt(dw.as_deref_mut(), word.trim_end(), *face, 15.0, 0.0, k);
             if x + trimmed > maxw && x > 0.0 {
-                if rows.len() == 2 {
-                    if let Some(last) = rows[1].last_mut() {
+                if rows.len() == max_rows {
+                    if let Some(last) = rows[max_rows - 1].last_mut() {
                         last.0 = format!("{}…", last.0.trim_end());
                     }
                     return rows;

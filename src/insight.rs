@@ -159,12 +159,14 @@ impl Engine {
     fn build_report(&mut self, prev: &PrevSession, now_ms: i64, out: &mut Insights) {
         let from = prev.samples.first().map_or(prev.session.started_ms, |s| s.t_ms) - 60_000;
         let events = crate::events::query(from, now_ms, 200);
-        let Some(r) = crate::report::build(prev, crate::sysinfo::boot_time_ms(), events, now_ms) else { return };
+        let Some(mut r) = crate::report::build(prev, crate::sysinfo::boot_time_ms(), events, now_ms) else { return };
+        // Hex announces unexpected restarts; a Tachyon-only stop just gets the panel banner
+        r.announced = r.cause != crate::report::Cause::Restart;
         if let Some(bb) = self.blackbox_dir() {
             let _ = crate::report::save(&bb, &r);
         }
+        out.report_new = !r.announced;
         out.report = Some(std::sync::Arc::new(r));
-        out.report_new = true;
     }
 
     /// Hex has told the user about the report.
@@ -231,7 +233,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("tachyon_engine_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let cfg = Config::default();
-        let t0 = 1_790_000_000_000i64;
+        let t0 = crate::telemetry::now_ms() - 2 * 3_600_000;
         // Session 1 runs for two minutes and is never closed (a crash).
         {
             let mut out = Insights::default();
@@ -253,7 +255,9 @@ mod tests {
             e.tick(Some(&gpu(5, 2000.0)), None, None, t1 + i * 1000, &mut out);
         }
         let r = out.report.clone().expect("report for the unclean session");
-        assert!(out.report_new);
+        // only a restart of this machine since the session is announced by Hex
+        assert_eq!(out.report_new, r.cause == crate::report::Cause::Restart);
+        assert_eq!(r.announced, !out.report_new);
         assert_eq!(r.samples, 116, "written every 5 s: the last few seconds are lost, as in a real crash");
         assert!(r.just_before.contains("GPU at 97%"), "{}", r.just_before);
         e.mark_announced(&mut out);

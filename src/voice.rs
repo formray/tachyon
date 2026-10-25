@@ -84,7 +84,14 @@ pub fn lines(snap: &Snapshot, cfg: &Config, now: chrono::DateTime<chrono::Local>
                 v.push(w("Nothing to report.", Tone::Quiet));
             } else {
                 v.push(w(&format!("GPU {util}%{deg}. "), Tone::Plain));
-                v.push(w(if power_cap { "Power cap active." } else { "All good." }, Tone::Quiet));
+                // no "All good." when a VRAM warning follows
+                let vram_ok = snap.insights.forecast.warning.is_none()
+                    && g.vram_used_mb.zip(g.vram_total_mb).is_none_or(|(u, t)| cfg.gpu.vram_level(u as f32, t as f32) == Level::Ok);
+                if power_cap {
+                    v.push(w("Power cap active.", Tone::Quiet));
+                } else if vram_ok {
+                    v.push(w("All good.", Tone::Quiet));
+                }
             }
         }
     }
@@ -287,6 +294,7 @@ mod tests {
         let l = lines(&f, &cfg, now);
         assert_eq!(l[1].text(), "At this rate VRAM will be full in ~3 min (python.exe is growing).");
         assert_eq!(l[1].words[0].1, Tone::Hot);
+        assert_eq!(l[0].text(), "GPU 90% · 64 °C. ", "no 'All good.' above a warning");
         // tight card with an idle hog
         let mut h = snap(64, 90, 15600.0);
         h.insights.forecast.hogs =
