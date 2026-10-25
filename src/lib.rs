@@ -12,6 +12,7 @@ pub mod nvml;
 pub mod parse;
 pub mod png;
 pub mod procinfo;
+pub mod recorder;
 pub mod scan;
 pub mod sysinfo;
 pub mod telemetry;
