@@ -54,14 +54,32 @@ fn is_candidate(p: &Path) -> bool {
 pub fn discover(roots: &[String], depth: usize) -> Vec<Candidate> {
     let mut out = Vec::new();
     let mut budget = 50_000usize;
+    let mut restat = RESTAT_MAX;
     for r in roots {
-        walk(Path::new(r), depth, &mut out, &mut budget);
+        walk(Path::new(r), depth, &mut out, &mut budget, &mut restat);
     }
     out.sort_by_key(|c| std::cmp::Reverse(c.mtime));
     out
 }
 
-fn walk(dir: &Path, depth: usize, out: &mut Vec<Candidate>, budget: &mut usize) {
+/// How many candidates per scan get their time from the file itself (see [`mtime_of`]).
+const RESTAT_MAX: usize = 2_000;
+
+/// Last-write time of a directory entry. On Windows, `DirEntry::metadata` is the copy NTFS keeps
+/// in the directory entry (FindNextFileW data), which is updated lazily while another process
+/// holds the file open for writing: a render log being appended can look minutes old there.
+/// `fs::metadata` opens the file without blocking the writer and reads the current time.
+fn mtime_of(e: &std::fs::DirEntry, p: &Path, restat: &mut usize) -> Option<SystemTime> {
+    if cfg!(windows) && *restat > 0 {
+        *restat -= 1;
+        if let Ok(m) = std::fs::metadata(p).and_then(|m| m.modified()) {
+            return Some(m);
+        }
+    }
+    e.metadata().and_then(|m| m.modified()).ok()
+}
+
+fn walk(dir: &Path, depth: usize, out: &mut Vec<Candidate>, budget: &mut usize, restat: &mut usize) {
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     for e in rd.flatten() {
         if *budget == 0 {
@@ -74,10 +92,10 @@ fn walk(dir: &Path, depth: usize, out: &mut Vec<Candidate>, budget: &mut usize) 
             let n = e.file_name().to_string_lossy().to_ascii_lowercase();
             // never descend into the bin or frame dumps
             if depth > 0 && !n.starts_with('.') && n != "frames" && n != "__pycache__" {
-                walk(&p, depth - 1, out, budget);
+                walk(&p, depth - 1, out, budget, restat);
             }
         } else if ft.is_file() && is_candidate(&p) {
-            if let Ok(m) = e.metadata().and_then(|m| m.modified()) {
+            if let Some(m) = mtime_of(&e, &p, restat) {
                 out.push(Candidate { path: p, mtime: m });
             }
         }

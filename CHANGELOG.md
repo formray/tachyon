@@ -1,5 +1,9 @@
 # Changelog
 
+## v5.1.1
+
+- Fixed: on Windows a render log still held open by its writer could look stale to the scan; its last-write time is now read from the file itself, and the scan tests no longer depend on Windows keeping file times when copying (the failed v5.1.0 Windows CI run).
+
 ## v5.1.0
 
 Tachyon 5.1 brings **Hex**, a desktop companion, alongside the new **Aurora** look.
