@@ -114,16 +114,20 @@ impl App {
             y += 38.0;
         }
         if let Some(v) = &i.bottleneck {
+            // live pass: the confidence word changes without moving anything
             let cap = format!("WHAT IS HOLDING IT BACK · {}", v.confidence_word().to_uppercase());
-            g.stat(|g| g.cap(&cap, x0, y + 10.0, 9.5, H::L, V::Base));
+            g.cap(&cap, x0, y + 10.0, 9.5, H::L, V::Base);
             let why = if self.show_why { "Hide numbers" } else { "Why? ›" };
             self.link(g, why, xr, y + 10.5, Btn::Why);
             y += 18.0;
             let c = if v.kind.is_problem() { T_AMBER } else { TEXT };
-            for row in wrap_g(g, &v.sentence, Face::Sans, 12.5, w, 3) {
-                g.text(&row, x0, y + 13.0, Face::Sans, 12.5, c, H::L, V::Base);
-                y += 17.0;
+            // At least two rows, so a sentence that rewraps does not move the static layer below.
+            let rows = wrap_g(g, &v.sentence, Face::Sans, 12.5, w, 3);
+            let n = rows.len().max(2);
+            for (k, row) in rows.iter().enumerate() {
+                g.text(row, x0, y + 13.0 + 17.0 * k as f32, Face::Sans, 12.5, c, H::L, V::Base);
             }
+            y += 17.0 * n as f32;
             if self.show_why {
                 let mut ev = v.evidence.clone();
                 if let Some(p) = &v.process {

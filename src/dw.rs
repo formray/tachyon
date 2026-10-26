@@ -93,6 +93,8 @@ struct FaceInfo {
     m: FontMetrics,
 }
 
+const CACHE_BYTES: usize = 3 << 20;
+
 /// One rasterised piece (a run of glyphs from one font) relative to the pen origin/baseline.
 struct Piece {
     left: i32,
@@ -115,6 +117,8 @@ pub struct Dw {
     factory: *mut c_void,
     chains: HashMap<Face, Vec<FaceInfo>>,
     cache: HashMap<(String, Face, u32, i32), Rc<Text>>,
+    /// Coverage bytes held by `cache`.
+    cache_bytes: usize,
     lut: [u8; 256],
     pub rasterised: u64,
 }
@@ -220,7 +224,7 @@ impl Dw {
             for (i, v) in lut.iter_mut().enumerate() {
                 *v = ((i as f32 / 255.0).powf(0.80) * 255.0).round() as u8;
             }
-            Some(Dw { factory: f, chains, cache: HashMap::new(), lut, rasterised: 0 })
+            Some(Dw { factory: f, chains, cache: HashMap::new(), cache_bytes: 0, lut, rasterised: 0 })
         }
     }
 
@@ -228,6 +232,7 @@ impl Dw {
     pub fn trim(&mut self) {
         self.cache.clear();
         self.cache.shrink_to_fit();
+        self.cache_bytes = 0;
     }
 
     /// Lay out and rasterise `s` at `px` pixels (cached).
@@ -241,10 +246,13 @@ impl Dw {
         if let Some(t) = self.cache.get(&key) {
             return t.clone();
         }
-        if self.cache.len() > 1500 {
+        // Strings with live numbers keep arriving: start over past 1500 entries or 3 MB of rasters.
+        if self.cache.len() > 1500 || self.cache_bytes > CACHE_BYTES {
             self.cache.clear();
+            self.cache_bytes = 0;
         }
         let t = Rc::new(unsafe { self.layout(s, face, px, track) });
+        self.cache_bytes += t.pieces.iter().map(|p| p.cov.len()).sum::<usize>();
         self.cache.insert(key, t.clone());
         t
     }

@@ -10,6 +10,9 @@ use std::collections::VecDeque;
 pub const WINDOW: usize = 10;
 /// Evaluations a new verdict must win in a row before it is shown.
 pub const HOLD: u32 = 4;
+/// While the verdict stays the same, its sentence (with its numbers) is refreshed this often,
+/// so the text is not re-laid out every second.
+pub const REFRESH: u32 = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -326,6 +329,7 @@ pub struct Explainer {
     w: VecDeque<Sample>,
     shown: Option<Verdict>,
     pending: Option<(Kind, u32)>,
+    age: u32,
 }
 
 impl Explainer {
@@ -340,7 +344,11 @@ impl Explainer {
             (None, _) => {}
             (Some(v), Some(cur)) if v.kind == cur.kind => {
                 self.pending = None;
-                self.shown = Some(v);
+                self.age += 1;
+                if self.age >= REFRESH || v.confidence_word() != cur.confidence_word() {
+                    self.shown = Some(v);
+                    self.age = 0;
+                }
             }
             (Some(v), cur) => {
                 let n = match self.pending {
@@ -350,6 +358,7 @@ impl Explainer {
                 if cur.is_none() || n >= HOLD {
                     self.shown = Some(v);
                     self.pending = None;
+                    self.age = 0;
                 } else {
                     self.pending = Some((v.kind, n));
                 }
@@ -573,5 +582,19 @@ pub mod tests {
         }
         let at = switched_at.expect("switched");
         assert!(at >= HOLD as usize - 1, "switched after {at} samples");
+    }
+
+    #[test]
+    fn sentence_numbers_refresh_slowly() {
+        let mut e = Explainer::default();
+        let mut texts = vec![];
+        for i in 0..30u8 {
+            let mut s = base();
+            s.util = Some(30 + i % 3);
+            s.dec = Some(95);
+            texts.push(e.push(&s).map(|v| v.sentence.clone()).unwrap_or_default());
+        }
+        let changes = texts.windows(2).filter(|w| w[0] != w[1]).count();
+        assert!((1..=4).contains(&changes), "{changes} changes: {texts:?}");
     }
 }
