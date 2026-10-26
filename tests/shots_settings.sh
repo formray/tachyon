@@ -36,7 +36,7 @@ snap() { # name: crop the panel window from the root
   eval "$(geo Tachyon)"; import -window root $OUT/root_$1.png
   convert $OUT/root_$1.png -crop ${WIDTH}x${HEIGHT}+${X}+${Y} +repage $OUT/$1.png; echo "  $1: ${WIDTH}x${HEIGHT}+${X}+${Y}"; }
 shots() {
-  for tab in general projects alerts data ai; do
+  for tab in ${TABS:-general projects alerts data ai}; do
     stop; cfg
     (cd $R && TACHYON_VIEW=settings TACHYON_SETTINGS_TAB=$tab TACHYON_DEBUG=1 timeout 40 wine tachyon.exe >> $OUT/run.log 2>&1 &)
     sleep 9; snap settings_$tab
@@ -54,5 +54,17 @@ clicks() {
   echo "--- MCP while the toggle is on (expect the live source, tachyon)"; python3 tests/mcp_client.py $R tachyon; echo "mcp exit $?"
   click ${AGENT_X:-436} ${AGENT_Y:-297}; sleep 2   # off again, live
   echo "--- MCP after switching it off (expect off)"; python3 tests/mcp_client.py $R off; echo "mcp exit $?"
+  stop; }
+keys() { # keyboard only: Tab to a control, Space toggles it, Ctrl+Tab changes tab, Esc leaves
+  stop; cfg; cp $R/tachyon.toml $OUT/before.toml
+  (cd $R && TACHYON_VIEW=settings TACHYON_SETTINGS_TAB=data TACHYON_DEBUG=1 timeout 60 wine tachyon.exe >> $OUT/run.log 2>&1 &)
+  sleep 9; W=$(xdotool search --onlyvisible --name "^Tachyon$" | head -1); xdotool windowactivate --sync $W 2>/dev/null || xdotool windowfocus $W
+  click 200 140  # focus the window without hitting a control
+  for k in Tab Tab Tab Tab Tab Tab Tab; do xdotool key --window $W $k; sleep 0.3; done
+  snap keys_focus
+  xdotool key --window $W space; sleep 1.5; snap keys_space
+  echo "--- diff after Space"; diff $OUT/before.toml $R/tachyon.toml
+  xdotool key --window $W ctrl+Tab; sleep 1; snap keys_ctrl_tab
+  xdotool key --window $W Escape; sleep 1; snap keys_escape
   stop; }
 "$@"

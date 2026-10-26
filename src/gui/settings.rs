@@ -40,6 +40,9 @@ pub(super) enum Ctl {
     Currency,
     Agent,
     CopyMcp,
+    Gpu(u8),
+    Startup,
+    Reset,
 }
 
 /// Open-view state. Dropped when the view closes.
@@ -50,11 +53,33 @@ pub(super) struct SetUi {
     backed_up: bool,
     msg: Option<(String, Rgb)>,
     saved_at: Option<String>,
+    /// "Reset settings" was clicked once: the next click resets
+    reset_armed: bool,
+    /// the Startup shortcut exists (read when the view opens and after a change)
+    startup: bool,
+    /// keyboard focus (Tab / Shift+Tab), drawn as a ring
+    pub focus: Option<Btn>,
+}
+
+/// Steppers: the value area (d = 0) is only a wheel target, not a keyboard stop.
+fn is_stepper(c: Ctl) -> bool {
+    matches!(
+        c,
+        Ctl::BubbleClose
+            | Ctl::Poll
+            | Ctl::TempAmber
+            | Ctl::TempRed
+            | Ctl::VramAmber
+            | Ctl::VramRed
+            | Ctl::Forecast
+            | Ctl::BlackboxMin
+            | Ctl::Price
+    )
 }
 
 impl SetUi {
     pub fn new(tab: Tab) -> Self {
-        SetUi { tab, ..Default::default() }
+        SetUi { tab, startup: tachyon::startup::enabled(), ..Default::default() }
     }
 }
 
@@ -209,11 +234,11 @@ impl App {
     }
 
     // ---- the view -------------------------------------------------------------------------
-    pub(super) fn draw_settings_view(&mut self, g: &mut G, lw: f32) -> f32 {
+    pub(super) fn draw_settings_view(&mut self, g: &mut G, lw: f32, gpus: &[String]) -> f32 {
         let (x0, xr) = (24.0, lw - 24.0);
         let w = xr - x0;
         let Some(su) = self.set.as_ref() else { return FIELD_H };
-        let (tab, saved_at, msg) = (su.tab, su.saved_at.clone(), su.msg.clone());
+        let (tab, saved_at, msg, startup, armed) = (su.tab, su.saved_at.clone(), su.msg.clone(), su.startup, su.reset_armed);
         let restart = st::restart_needed(self.boot_blackbox, &self.cfg);
         let cap = match (&saved_at, restart.is_empty()) {
             (_, false) => format!("SAVED · RESTART TACHYON TO APPLY THE {}", restart.join(", ").to_uppercase()),
@@ -248,10 +273,19 @@ impl App {
                 let cy = self.row(g, x0, xr, y, "Refresh", "How often the GPU is read; slower is lighter", 130.0);
                 self.stepper(g, xr, cy, &poll_label(c.poll_ms), Ctl::Poll, c.poll_ms > POLL_STEPS[0], c.poll_ms < POLL_STEPS[4]);
                 y += ROW;
-                let cy =
-                    self.row(g, x0, xr, y, "Start with Windows", "Not built in yet: add a shortcut to tachyon.exe in shell:startup", 0.0);
-                let _ = cy;
+                let cy = self.row(g, x0, xr, y, "Start with Windows", "A shortcut in your Startup folder; no admin rights", 50.0);
+                self.toggle(g, xr, cy, startup, Btn::Set(Ctl::Startup, 0));
                 y += ROW;
+                let gpus = gpus.to_vec();
+                if gpus.len() > 1 {
+                    let sel = (self.s.selected as usize).min(gpus.len() - 1);
+                    let name = gpus[sel].trim_start_matches("NVIDIA ").to_string();
+                    let cy = self.row(g, x0, xr, y, "GPU", &name, 60.0 * gpus.len().min(4) as f32);
+                    let labels: Vec<String> = (0..gpus.len().min(4)).map(|i| format!("GPU {i}")).collect();
+                    let lr: Vec<&str> = labels.iter().map(|l| l.as_str()).collect();
+                    self.segments(g, xr, cy, &lr, sel, |i| Btn::Set(Ctl::Gpu(i), 0));
+                    y += ROW;
+                }
             }
             Tab::Projects => {
                 y = self.note(
@@ -362,8 +396,19 @@ impl App {
                 self.pill(g, xr, cy, &cur, Btn::Set(Ctl::Currency, 0));
                 y += ROW;
                 let dir = self.s.engine.history_dir().and_then(|d| d.parent().map(|p| p.display().to_string()));
+                let cy = self.row(g, x0, xr, y, "Reset settings", "Back to the defaults; the old file is kept as .bak", 120.0);
+                self.pill(g, xr, cy, if armed { "Click to confirm" } else { "Reset…" }, Btn::Set(Ctl::Reset, 0));
+                y += ROW;
                 if let Some(d) = dir {
-                    y = self.note(g, x0, w, y + 2.0, &format!("Stored in {d}. Nothing leaves this PC."), TEXT2, 2);
+                    y = self.note(
+                        g,
+                        x0,
+                        w,
+                        y + 2.0,
+                        &format!("Stored in {d}. Nothing leaves this PC. To remove Tachyon: quit it, delete tachyon.exe, its tachyon.toml and that folder."),
+                        TEXT2,
+                        3,
+                    );
                 }
             }
             Tab::Ai => {
@@ -411,13 +456,101 @@ impl App {
         if let Some((m, c)) = msg {
             y = self.note(g, x0, w, y + 4.0, &m, c, 2);
         }
+        // keyboard focus ring (dynamic layer: moving it does not redraw the static one)
+        let focus = self.set.as_ref().and_then(|s| s.focus);
+        if let Some(r) = focus.and_then(|f| self.hits.iter().rev().find(|h| h.1 == f).map(|h| h.0)) {
+            let rad = (r.h / 2.0).min(14.0) + 3.0;
+            g.stroke_rrect(r.grow(3.0), rad, CYAN, 0.95, 2.0);
+        }
         y
+    }
+
+    /// Keyboard: Tab / Shift+Tab move between controls, Space or Enter press, Left/Right step a
+    /// value or move between tabs and segments, Ctrl+Tab changes tab, Esc goes back.
+    /// Returns true when the key was used.
+    pub(super) fn settings_key(&mut self, vk: u16, shift: bool, ctrl: bool) -> bool {
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SPACE, VK_TAB};
+        let stops: Vec<Btn> = {
+            let mut v: Vec<Btn> = vec![];
+            for (_, b) in &self.hits {
+                if let Btn::Set(c, d) = *b {
+                    if (d == 0 && is_stepper(c)) || v.contains(b) {
+                        continue;
+                    }
+                    v.push(*b);
+                }
+            }
+            v
+        };
+        let Some(su) = self.set.as_mut() else { return false };
+        let cur = su.focus.and_then(|f| stops.iter().position(|b| *b == f));
+        let tab_i = TABS.iter().position(|t| t.0 == su.tab).unwrap_or(0) as i32;
+        match vk {
+            VK_TAB if ctrl => {
+                let n = TABS.len() as i32;
+                let i = (tab_i + if shift { -1 } else { 1 }).rem_euclid(n);
+                su.focus = Some(Btn::Set(Ctl::Tab(i as u8), 0));
+                self.settings_click(Ctl::Tab(i as u8), 0);
+            }
+            VK_TAB => {
+                if stops.is_empty() {
+                    return true;
+                }
+                let n = stops.len() as i32;
+                let i = match cur {
+                    Some(c) => (c as i32 + if shift { -1 } else { 1 }).rem_euclid(n),
+                    None if shift => n - 1,
+                    None => 0,
+                };
+                su.focus = Some(stops[i as usize]);
+            }
+            VK_RETURN | VK_SPACE => {
+                if let Some(Btn::Set(c, d)) = su.focus {
+                    self.settings_click(c, d);
+                    return true;
+                }
+                return false;
+            }
+            VK_LEFT | VK_RIGHT => {
+                let by: i32 = if vk == VK_RIGHT { 1 } else { -1 };
+                match su.focus {
+                    Some(Btn::Set(c, _)) if is_stepper(c) => {
+                        self.settings_click(c, by as i8);
+                        return true;
+                    }
+                    Some(Btn::Set(Ctl::Tab(i), _)) => {
+                        let j = (i as i32 + by).rem_euclid(TABS.len() as i32) as u8;
+                        su.focus = Some(Btn::Set(Ctl::Tab(j), 0));
+                        self.settings_click(Ctl::Tab(j), 0);
+                        return true;
+                    }
+                    Some(Btn::Set(Ctl::Mode(i), _)) => {
+                        let j = (i as i32 + by).clamp(0, 2) as u8;
+                        su.focus = Some(Btn::Set(Ctl::Mode(j), 0));
+                        self.settings_click(Ctl::Mode(j), 0);
+                        return true;
+                    }
+                    _ => return false,
+                }
+            }
+            VK_ESCAPE => {
+                self.open_view(View::Main);
+                return true;
+            }
+            _ => return false,
+        }
+        self.fg_valid = false;
+        unsafe { self.frame(true) };
+        true
     }
 
     // ---- actions --------------------------------------------------------------------------
     pub(super) fn settings_click(&mut self, ctl: Ctl, d: i8) {
         let Some(su) = self.set.as_mut() else { return };
         su.msg = None;
+        if ctl != Ctl::Reset {
+            su.reset_armed = false;
+        }
         let d = d as i32;
         let mut changed = true;
         let c = &mut self.cfg;
@@ -474,6 +607,56 @@ impl App {
                 c.currency = CURRENCIES[i % CURRENCIES.len()].to_string();
             }
             Ctl::Agent => c.agent_api = !c.agent_api,
+            Ctl::Gpu(i) => {
+                c.gpu_index = i as u32;
+                self.s.selected = i as u32;
+                self.s.tick();
+            }
+            Ctl::Startup => {
+                changed = false;
+                let exe = std::env::current_exe().unwrap_or_default();
+                let on = !su.startup;
+                match tachyon::startup::set(on, &exe) {
+                    Ok(()) => {
+                        su.startup = tachyon::startup::enabled();
+                        su.msg = Some((
+                            if on {
+                                "Tachyon starts when you sign in to Windows (Startup folder shortcut)."
+                            } else {
+                                "Tachyon no longer starts with Windows."
+                            }
+                            .into(),
+                            T_CYAN,
+                        ));
+                    }
+                    Err(e) => su.msg = Some((format!("Could not change it: {e}"), T_AMBER)),
+                }
+            }
+            Ctl::Reset => {
+                changed = false;
+                if !su.reset_armed {
+                    su.reset_armed = true;
+                    su.msg = Some((
+                        "Click Reset again to go back to the defaults. Your current file is kept as tachyon.toml.bak.".into(),
+                        T_AMBER,
+                    ));
+                } else {
+                    su.reset_armed = false;
+                    match st::reset(&self.path, &c.window) {
+                        Ok(fresh) => {
+                            *c = fresh;
+                            su.msg = Some(("Settings reset. The previous file is kept as tachyon.toml.bak.".into(), T_CYAN));
+                            su.saved_at = Some(chrono::Local::now().format("%H:%M:%S").to_string());
+                            su.backed_up = true;
+                            self.s.apply(self.cfg.clone());
+                            if let Some(cp) = self.comp.as_mut() {
+                                cp.b_close_secs = self.cfg.bubble_close_secs;
+                            }
+                        }
+                        Err(e) => su.msg = Some((e, T_AMBER)),
+                    }
+                }
+            }
             Ctl::CopyMcp => {
                 changed = false;
                 let exe = std::env::current_exe().unwrap_or_default();

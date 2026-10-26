@@ -145,6 +145,7 @@ pub fn with_settings(text: &str, c: &Config) -> Result<String, String> {
         }
     }
     top!("poll_ms", poll_ms, c.poll_ms as i64);
+    top!("gpu_index", gpu_index, c.gpu_index as i64);
     top!("blackbox", blackbox, c.blackbox);
     top!("blackbox_minutes", blackbox_minutes, c.blackbox_minutes as i64);
     top!("history", history, c.history);
@@ -194,6 +195,14 @@ pub fn with_settings(text: &str, c: &Config) -> Result<String, String> {
         }
     }
     Ok(doc.to_string())
+}
+
+/// Reset settings: the defaults (window positions kept) replace the file; the old file is kept
+/// as the backup. Returns the new settings.
+pub fn reset(path: &Path, keep_window: &crate::config::WindowCfg) -> Result<Config, String> {
+    let text = crate::config::with_window(&crate::config::default_text(), keep_window)?;
+    write_atomic(path, &text, path.exists())?;
+    toml::from_str(&text).map_err(|e| e.to_string())
 }
 
 /// Path of the backup kept next to the settings file.
@@ -428,6 +437,30 @@ mod tests {
         assert_eq!(restart_needed(run, &b), vec!["flight recorder"]);
         b.blackbox = false;
         assert_eq!(restart_needed(run, &b), vec!["flight recorder"]);
+    }
+
+    #[test]
+    fn reset_keeps_the_old_file_as_backup_and_the_window_where_it_was() {
+        let d = std::env::temp_dir().join(format!("tachyon_reset_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let p = d.join("tachyon.toml");
+        let mine = "# mine\nagent_api = true\npoll_ms = 250\nrender_roots = ['D:\\\\work']\n[window]\nx = 300\ny = 40\n";
+        std::fs::write(&p, mine).unwrap();
+        let w = crate::config::WindowCfg { x: Some(300.0), y: Some(40.0), ..Default::default() };
+        let c = reset(&p, &w).unwrap();
+        assert!(!c.agent_api && c.poll_ms == Config::default().poll_ms && c.render_roots.is_empty());
+        assert_eq!((c.window.x, c.window.y), (Some(300.0), Some(40.0)));
+        assert_eq!(std::fs::read_to_string(backup_path(&p)).unwrap(), mine);
+        assert!(crate::config::load(&p).warn.is_none());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn gpu_choice_is_saved() {
+        let c = Config { gpu_index: 1, ..Default::default() };
+        let out = with_settings("poll_ms = 1000\n", &c).unwrap();
+        assert!(out.contains("gpu_index = 1"), "{out}");
     }
 
     #[test]

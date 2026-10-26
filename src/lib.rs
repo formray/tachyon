@@ -24,6 +24,8 @@ pub mod recorder;
 pub mod report;
 pub mod scan;
 pub mod settings;
+#[cfg(windows)]
+pub mod startup;
 pub mod sysinfo;
 pub mod telemetry;
 pub mod theme;

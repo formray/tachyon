@@ -90,12 +90,14 @@ impl Private {
 impl Drop for Private {
     fn drop(&mut self) {
         unsafe {
-            LocalFree(self.sd as *mut c_void);
+            LocalFree(self.sd);
         }
     }
 }
 
 /// True when the kernel object behind `h` is owned by the current user.
+// `h` is only handed to the OS (an invalid handle makes GetSecurityInfo fail), never dereferenced.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn owned_by_me(h: HANDLE) -> bool {
     let Some(me) = UserSid::get() else { return false };
     unsafe {
@@ -113,7 +115,7 @@ pub fn owned_by_me(h: HANDLE) -> bool {
         );
         let mine = r == 0 && !owner.is_null() && EqualSid(owner, me.psid()) != 0;
         if !sd.is_null() {
-            LocalFree(sd as *mut c_void);
+            LocalFree(sd);
         }
         mine
     }

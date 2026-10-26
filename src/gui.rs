@@ -1789,7 +1789,7 @@ impl App {
         if self.view != View::Main {
             let y = match self.view {
                 View::Report => self.draw_report_view(g, s, lw),
-                View::Settings => self.draw_settings_view(g, lw),
+                View::Settings => self.draw_settings_view(g, lw, &s.gpus),
                 _ => self.draw_history_view(g, s, lw),
             };
             self.panel_fixed_h = y;
@@ -2251,6 +2251,19 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     a.click(b);
                 }
             }
+            return 0;
+        }
+        WM_KEYDOWN if a.view == View::Settings && !a.island() => {
+            use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL, VK_SHIFT};
+            let shift = GetKeyState(VK_SHIFT as i32) < 0;
+            let ctrl = GetKeyState(VK_CONTROL as i32) < 0;
+            if a.settings_key(wp as u16, shift, ctrl) {
+                return 0;
+            }
+        }
+        WM_KEYDOWN if !a.island() && wp as u16 == 0xBC && windows_sys::Win32::UI::Input::KeyboardAndMouse::GetKeyState(0x11) < 0 => {
+            // Ctrl+, opens Settings (as in most apps)
+            a.open_settings(None);
             return 0;
         }
         WM_MOUSEWHEEL if a.view == View::Settings && !a.island() => {

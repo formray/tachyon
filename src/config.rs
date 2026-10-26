@@ -630,7 +630,8 @@ pub fn corrupt_copy_path(path: &Path) -> PathBuf {
     p
 }
 
-fn default_text() -> String {
+/// The settings file written on a first start (and by Reset settings).
+pub fn default_text() -> String {
     format!("{HEADER}{}", toml::to_string_pretty(&Config::default()).unwrap_or_default())
 }
 
