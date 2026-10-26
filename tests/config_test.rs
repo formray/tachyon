@@ -164,7 +164,9 @@ fn damaged_settings_are_kept_and_replaced_by_defaults() {
 fn package_manager_installs_keep_settings_in_the_data_folder() {
     use std::path::Path;
     use tachyon::config::managed_install;
-    assert!(managed_install(Path::new(r"C:\Users\ann\AppData\Local\Microsoft\WinGet\Packages\Formray.Tachyon_Microsoft.Winget.Source_8wekyb3d8bbwe\Tachyon")));
+    assert!(managed_install(Path::new(
+        r"C:\Users\ann\AppData\Local\Microsoft\WinGet\Packages\Formray.Tachyon_Microsoft.Winget.Source_8wekyb3d8bbwe\Tachyon"
+    )));
     assert!(managed_install(Path::new(r"C:\Program Files\WinGet\Packages\Formray.Tachyon_x\Tachyon")));
     assert!(managed_install(Path::new(r"C:\Users\ann\scoop\apps\tachyon\1.0.1")));
     assert!(managed_install(Path::new(r"C:\ProgramData\scoop\apps\tachyon\current")));
