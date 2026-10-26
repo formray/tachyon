@@ -463,6 +463,8 @@ struct App {
     cfg: Config,
     path: std::path::PathBuf,
     warn: Option<String>,
+    /// First start only: how to find Settings and the modes.
+    hint: Option<String>,
     s: Sampler,
     hwnd: HWND,
     scale: f32,
@@ -528,6 +530,9 @@ struct App {
 
 static mut APP: *mut App = null_mut();
 #[allow(static_mut_refs)]
+/// Shown in the panel on the very first start.
+const WELCOME: &str = "Welcome to Tachyon. Right-click it (or use the gear) for Settings. Modes: island at the top of the screen, Hex on the desktop, or this panel.";
+
 fn app() -> Option<&'static mut App> {
     unsafe { APP.as_mut() }
 }
@@ -552,7 +557,8 @@ pub fn run() {
         let m0 = mem_mb();
         let mut mem_log = vec![("start", m0.0, m0.1)];
         let path = config::config_path();
-        let (cfg, warn) = config::load_or_create(&path);
+        let loaded = config::load(&path);
+        let (cfg, warn, first_run, path) = (loaded.cfg, loaded.warn, loaded.first_run, loaded.path);
         let mut dw = Dw::new();
         if let (Some(d), Some(path)) = (dw.as_mut(), std::env::var_os("TACHYON_DWTEST")) {
             let _ = std::fs::write(
@@ -594,6 +600,7 @@ pub fn run() {
             cfg,
             path,
             warn,
+            hint: first_run.then(|| WELCOME.to_string()),
             s,
             hwnd: null_mut(),
             scale: 1.0,
@@ -663,7 +670,8 @@ pub fn run() {
             };
             ap.set = Some(Box::new(settings::SetUi::new(tab)));
         }
-        let start = ap.cfg.start_mode();
+        // the first start opens the panel, where the welcome hint is
+        let start = if first_run && std::env::var_os("TACHYON_VIEW").is_none() { UiMode::Panel } else { ap.cfg.start_mode() };
         ap.mode = start;
         if start != UiMode::Companion {
             ap.cfg.window.compact = start == UiMode::Island;
@@ -1800,10 +1808,13 @@ impl App {
         }
         // ---- body
         let mut y = FIELD_H + 4.0;
-        if let Some(w) = self.warn.clone() {
-            let w = g.fit(&w, Face::Sans, 12.0, lw - 2.0 * x0);
-            g.stat(|g| g.text(&w, x0, y + 12.0, Face::Sans, 12.0, T_AMBER, H::L, V::Base));
-            y += 20.0;
+        for (msg, col) in [(self.warn.clone(), T_AMBER), (self.hint.clone(), T_CYAN)] {
+            let Some(m) = msg else { continue };
+            for line in views::wrap_g(g, &m, Face::Sans, 12.0, lw - 2.0 * x0, 3) {
+                g.stat(|g| g.text(&line, x0, y + 12.0, Face::Sans, 12.0, col, H::L, V::Base));
+                y += 17.0;
+            }
+            y += 4.0;
         }
         if let Some(rv) = &s.render {
             y = render_block(g, rv, R::new(16.0, y, lw - 32.0, 0.0)) + 12.0;

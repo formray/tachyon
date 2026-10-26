@@ -103,3 +103,59 @@ fn window_state_saved_without_touching_comments() {
     assert_eq!(c2.window.y, Some(80.0));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+fn scratch(name: &str) -> std::path::PathBuf {
+    let d = std::env::temp_dir().join(format!("tachyon_{name}_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
+
+#[test]
+fn first_start_writes_defaults_and_says_so() {
+    let d = scratch("first");
+    let p = d.join("tachyon.toml");
+    let l = config::load(&p);
+    assert!(l.first_run && l.warn.is_none() && l.path == p);
+    let text = std::fs::read_to_string(&p).unwrap();
+    assert!(!text.contains(r"C:\Users") && !text.contains("/home/"), "no personal paths: {text}");
+    assert!(l.cfg.render_roots.is_empty() && !l.cfg.agent_api, "safe defaults");
+    let again = config::load(&p);
+    assert!(!again.first_run && again.warn.is_none());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn damaged_settings_are_kept_and_replaced_by_defaults() {
+    let cases: Vec<(&str, Vec<u8>)> = vec![
+        ("syntax", b"poll_ms = [\n".to_vec()),
+        ("types", b"poll_ms = \"fast\"\n".to_vec()),
+        ("utf8", vec![b'#', 0xff, 0xfe, b'\n', b'x']),
+        ("huge", vec![b'#'; (config::MAX_CONFIG_BYTES + 10) as usize]),
+    ];
+    for (name, body) in cases {
+        let d = scratch(&format!("bad_{name}"));
+        let p = d.join("tachyon.toml");
+        std::fs::write(&p, &body).unwrap();
+        let l = config::load(&p);
+        let w = l.warn.clone().unwrap_or_default();
+        assert!(w.contains("could not be read") && w.contains(".corrupt-"), "{name}: {w}");
+        assert!(!l.first_run && l.cfg.poll_ms == Config::default().poll_ms);
+        let kept: Vec<_> = std::fs::read_dir(&d)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".corrupt-"))
+            .collect();
+        assert_eq!(kept.len(), 1, "{name}");
+        assert_eq!(std::fs::read(kept[0].path()).unwrap(), body, "{name}: the damaged file is kept byte for byte");
+        let fresh = config::load(&p);
+        assert!(fresh.warn.is_none(), "{name}: the defaults written in its place load");
+        // a second damage keeps both copies
+        std::fs::write(&p, &body).unwrap();
+        let _ = config::load(&p);
+        let n =
+            std::fs::read_dir(&d).unwrap().filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().contains(".corrupt-")).count();
+        assert_eq!(n, 2, "{name}: nothing is overwritten");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}

@@ -61,6 +61,9 @@ impl App {
     /// Open a panel view from anywhere (menu, bubble, links).
     pub(super) fn open_view(&mut self, v: View) {
         self.view = v;
+        if v == View::Settings {
+            self.hint = None; // found it
+        }
         if v == View::Settings && self.set.is_none() {
             self.set = Some(Box::new(super::settings::SetUi::new(Default::default())));
         } else if v != View::Settings {

@@ -569,8 +569,18 @@ impl Config {
 
 /// Settings file next to the running exe: tachyon.toml, or a legacy rig_monitor.toml when only that exists.
 pub fn config_path() -> PathBuf {
+    if let Some(p) = std::env::var_os("TACHYON_CONFIG").filter(|p| !p.is_empty()) {
+        return PathBuf::from(p);
+    }
     let dir = std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf)).unwrap_or_else(|| PathBuf::from("."));
-    pick_config(&dir)
+    let p = pick_config(&dir);
+    // a read-only exe folder (Program Files): the settings live in the data folder
+    if !p.exists()
+        && let Some(alt) = data_dir().map(|d| d.join("tachyon.toml")).filter(|a| a.exists())
+    {
+        return alt;
+    }
+    p
 }
 
 /// tachyon.toml wins; a legacy rig_monitor.toml is used only if tachyon.toml does not exist.
@@ -588,28 +598,95 @@ pub const HEADER: &str = "# Tachyon settings. Most of these are on the Settings 
 # blackbox and history keep their files in %LOCALAPPDATA%\\Tachyon. Nothing leaves this PC.\n\
 # price_per_kwh = 0.30 shows what each job cost. agent_api = true lets local AI agents read the state (tachyon mcp).\n";
 
+/// Biggest settings file Tachyon reads; anything larger is treated as damaged.
+pub const MAX_CONFIG_BYTES: u64 = 1 << 20;
+
+/// What loading the settings found.
+#[derive(Debug)]
+pub struct Loaded {
+    pub cfg: Config,
+    /// The file in use (it may have moved to the data folder when the exe's folder is read-only).
+    pub path: PathBuf,
+    /// A message for the panel (damaged file recovered, file could not be written, ...).
+    pub warn: Option<String>,
+    /// No settings file existed: this is the first start.
+    pub first_run: bool,
+}
+
+fn file_name(path: &Path) -> String {
+    path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+}
+
+/// `<name>.corrupt-YYYYmmdd-HHMMSS` next to the file, never an existing name.
+pub fn corrupt_copy_path(path: &Path) -> PathBuf {
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let base = format!("{}.corrupt-{stamp}", file_name(path));
+    let mut p = path.with_file_name(&base);
+    let mut n = 2;
+    while p.exists() {
+        p = path.with_file_name(format!("{base}-{n}"));
+        n += 1;
+    }
+    p
+}
+
+fn default_text() -> String {
+    format!("{HEADER}{}", toml::to_string_pretty(&Config::default()).unwrap_or_default())
+}
+
+/// Read the settings file without ever failing: missing = first start (the defaults are
+/// written), damaged = the file is kept under a new name and the defaults are used and written.
+/// When the exe's folder is read-only the file goes to the data folder instead.
+pub fn load(path: &Path) -> Loaded {
+    let read = std::fs::metadata(path).and_then(|m| {
+        if m.len() > MAX_CONFIG_BYTES {
+            Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("larger than {} KB", MAX_CONFIG_BYTES >> 10)))
+        } else {
+            std::fs::read_to_string(path)
+        }
+    });
+    let mut out = Loaded { cfg: Config::default(), path: path.to_path_buf(), warn: None, first_run: false };
+    let damaged = match read {
+        Ok(text) => match toml::from_str::<Config>(&text) {
+            Ok(c) => {
+                out.cfg = c;
+                return out;
+            }
+            Err(e) => e.message().to_string() + &e.span().map(|r| format!(" (at byte {})", r.start)).unwrap_or_default(),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            out.first_run = true;
+            if let Err(e) = crate::settings::write_atomic(path, &default_text(), false) {
+                let alt = data_dir().map(|d| d.join("tachyon.toml")).filter(|a| a != path);
+                let moved = alt.filter(|a| {
+                    a.parent().is_some_and(|d| std::fs::create_dir_all(d).is_ok())
+                        && crate::settings::write_atomic(a, &default_text(), false).is_ok()
+                });
+                match moved {
+                    Some(a) => out.path = a,
+                    None => out.warn = Some(format!("Settings are not saved: {e}")),
+                }
+            }
+            return out;
+        }
+        Err(e) => e.to_string(),
+    };
+    let keep = corrupt_copy_path(path);
+    let kept = std::fs::copy(path, &keep).is_ok();
+    let rewrote = kept && crate::settings::write_atomic(path, &default_text(), false).is_ok();
+    out.warn = Some(if rewrote {
+        format!("{} could not be read ({damaged}); started with defaults. Your file is kept as {}.", file_name(path), file_name(&keep))
+    } else {
+        format!("{} could not be read ({damaged}); using defaults this time.", file_name(path))
+    });
+    out
+}
+
 /// Load the config; if the file is missing, write the defaults.
 /// Returns the config plus an optional warning to show in the UI.
 pub fn load_or_create(path: &Path) -> (Config, Option<String>) {
-    match std::fs::read_to_string(path) {
-        Ok(s) => match toml::from_str::<Config>(&s) {
-            Ok(c) => (c, None),
-            Err(e) => (
-                Config::default(),
-                Some(format!(
-                    "bad {}, using defaults: {e}",
-                    path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
-                )),
-            ),
-        },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            let c = Config::default();
-            let body = format!("{HEADER}{}", toml::to_string_pretty(&c).unwrap_or_default());
-            let warn = std::fs::write(path, body).err().map(|e| format!("could not write default toml: {e}"));
-            (c, warn)
-        }
-        Err(e) => (Config::default(), Some(format!("cannot read toml: {e}"))),
-    }
+    let l = load(path);
+    (l.cfg, l.warn)
 }
 
 /// Update only the `[window]` table of an existing toml text, keeping comments and other keys.
