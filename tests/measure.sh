@@ -8,13 +8,17 @@ render_on() { echo "$(date +%H:%M:%S) start 02x 169 try 1 NF=1420" >> $LOGS/batc
 render_off() { pkill -f "r_733.log" || true; sleep 1; touch -d '2 hours ago' $PROJ/*.log $LOGS/*.log; }
 COOL="mode = 'companion'\n[gpu]\ntemp_amber_c = 90\ntemp_red_c = 95"
 HOT="mode = 'companion'\n[gpu]\ntemp_amber_c = 72\ntemp_red_c = 95"
+# m <compact> <label> [extra toml]: the new exe, and the old one alongside when OLD is set
+m() { [ -n "$OLD" ] && python3 measure.py $OLD tachyon.toml "$1" "old $2" "$3"; python3 measure.py $NEW tachyon.toml "$1" "$2" "$3"; }
+ISL="mode = 'island'"; PAN="mode = 'panel'"
+rm -f /tmp/tachyon-wine/wp/drive_c/rmfake/scenario.txt
 render_off
-[ -n "$OLD" ] && python3 measure.py $OLD tachyon.toml true "old island (idle)"
-python3 measure.py $NEW tachyon.toml true "island (idle)"
-python3 measure.py $NEW tachyon.toml true "companion idle (breath + blinks)" "$COOL"
-python3 measure.py $NEW tachyon.toml true "companion hot (3 fps loop)" "$HOT"
+m true "island (idle)" "$ISL"
+m true "companion idle (breath + blinks)" "$COOL"
+[ -z "$QUICK" ] && python3 measure.py $NEW tachyon.toml true "companion hot (3 fps loop)" "$HOT"
+m false "panel (idle)" "$PAN"
 render_on
-[ -n "$OLD" ] && python3 measure.py $OLD tachyon.toml true "old island (rendering)"
-python3 measure.py $NEW tachyon.toml true "companion rendering (2 fps + edge)" "$COOL"
+m true "island (rendering)" "$ISL"
+m true "companion rendering (2 fps + edge)" "$COOL"
+m false "panel (rendering)" "$PAN"
 render_off
-python3 measure.py $NEW tachyon.toml false "panel (idle)"

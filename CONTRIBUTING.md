@@ -3,10 +3,11 @@
 Thanks for helping. A few ground rules keep Tachyon small and trustworthy.
 
 ## Principles
-- **Read-only, always.** Nothing is written except the app's own `tachyon.toml`. Never change clocks, fans, power limits or other processes. No network access, no telemetry.
+- **Read-only, always.** Nothing is written except the app's own `tachyon.toml` and its data folder (`%LOCALAPPDATA%\Tachyon`: flight recorder, history, exports). Never change clocks, fans, power limits or other processes. No network access, no telemetry.
 - **Light first.** No constant animation timers (Hex arms one one-shot timer per drawn frame; transitions are bounded), no extra threads, no GPU rendering context. Present a frame only when something changed. If a change adds per-frame work, include `TACHYON_DEBUG=1` paint/CPU numbers before and after.
 - **Readable.** Text colours must keep WCAG 4.5:1 on the glass and solid cards (`cargo test` checks `theme.rs`); labels stay at 12 px or more.
 - **Privacy by default.** Show file names, not full paths. Anything more revealing (like command lines) must be opt-in in the toml.
+- **Insights ride on existing samples.** The explainer, forecast, recorder and history get the sample the monitor just took; don't add polling or threads for them. Thresholds and hysteresis need a synthetic test (see `src/explain.rs`, `src/forecast.rs`).
 - **Graceful degradation.** Every NVML call may be missing or return NOT_SUPPORTED; show "N/A" and keep going.
 
 ## Workflow
@@ -20,6 +21,8 @@ Thanks for helping. A few ground rules keep Tachyon small and trustworthy.
    - fake GPU processes: build `tests/sleeper.c`; `tests/wine.sh start` starts Xvfb, picom (so layered alpha is really blended) and copies of the sleeper inside the prefix, and writes their PIDs to `C:\rmfake\procs.txt` (`<pid> <vram_mb|-1> <G|C> <sm> <enc> <dec>` per line);
    - `tests/shots.sh <scenario>` takes screenshots (a fake render log tree goes in `/tmp/tachyon-wine/projects/demo4k`); `tests/interact.sh` and `tests/interact_hex.sh` click through island, panel, Hex and bubble with xdotool; `tests/measure.sh` measures CPU and RSS of each mode;
    - put static (not variable) TrueType fonts in the prefix's `windows/Fonts`, or wine's DirectWrite picks synthetic oblique faces;
+   - 1.0 views: `tests/shots_v1.sh crash|bottleneck|forecast|history` (the fake driver reads a scenario from `C:\rmfake\scenario.txt`: decode, ramp, idle, busy or hot); `TACHYON_DEMO_DIR=<dir> cargo test --release --test demo_data -- --ignored` seeds an unclean session and three jobs; `TACHYON_VIEW=report|history` opens a view at start; `TACHYON_DATA_DIR=<dir>` moves the data folder;
+   - `python3 tests/mcp_client.py <dir with tachyon.exe> off|standalone|tachyon` drives `tachyon.exe mcp` like an MCP client and checks every tool;
    - `TACHYON_DUMP_DIR=<dir>` writes the raw premultiplied BGRA frames, for previews; `cargo run --example hex_dump` renders Hex frames without Windows.
 
 ## Reporting bugs
