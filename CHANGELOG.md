@@ -26,7 +26,7 @@ Four additions for render machines, all read-only like before. Draft: the versio
 - Reports go to `history/marked_jobs.jsonl`; `get_status.marked_jobs` (open, last, notes) and the new read-only MCP tool `get_job_reports` (`n`, `name`). The MCP server stays read-only: it never writes markers.
 
 **Measured on the RTX 5080 (Windows 11, 32 threads), whole Tachyon process, companion mode, 60 s windows**
-- Idle with fast sampling on: 1.09% of one core (0.034% of the CPU); off: 1.22% (noise: the fast thread costs less than the run-to-run difference). Under GPU load, on: 1.42% of one core. Working set 5-6 MB, private memory 32 MB either way; one extra thread.
+- Idle, back to back on the same desktop: 1.1.0 1.35% of one core; 1.2 with fast sampling and per-process VRAM off 1.25%; 1.2 with the defaults 1.67% and 1.22% (two runs), and 1.09% in an earlier run. The run-to-run spread (about ±0.3 points, Windows counts CPU time in 15.6 ms ticks) is larger than what 1.2 adds; the fast thread's own time stayed below one tick per minute. Under GPU load: 1.42%. All of it is 0.03-0.05% of the 32-thread CPU. Working set 5-6 MB; private memory 31.5 MB with the defaults vs 28.3 MB for 1.1.0; one extra thread.
 - A marked 60 s GPU job (RIG test render, 1080p CUDA + NVENC): 81% average GPU, 2.3 GB VRAM peak, 247 W average, 262 W peak (100 ms), 4.1 Wh, Gen5 x16 throughout.
 - After Tachyon was killed, the fast ring's last reading was 0.35 s before the kill (the 1 s recorder's last sample 4.4 s before).
 
