@@ -7,7 +7,7 @@ impl Rng {
     pub fn new(seed: u64) -> Self {
         Self(seed.max(1))
     }
-    pub fn next(&mut self) -> u64 {
+    pub fn next_u64(&mut self) -> u64 {
         // xorshift64*
         let mut x = self.0;
         x ^= x >> 12;
@@ -17,11 +17,11 @@ impl Rng {
         x.wrapping_mul(0x2545_f491_4f6c_dd1d)
     }
     pub fn below(&mut self, n: usize) -> usize {
-        (self.next() % n.max(1) as u64) as usize
+        (self.next_u64() % n.max(1) as u64) as usize
     }
     pub fn bytes(&mut self, max: usize) -> Vec<u8> {
         let n = self.below(max + 1);
-        (0..n).map(|_| self.next() as u8).collect()
+        (0..n).map(|_| self.next_u64() as u8).collect()
     }
     /// Flip, insert, delete, duplicate or truncate parts of `seed`.
     pub fn mutate(&mut self, seed: &[u8]) -> Vec<u8> {
@@ -30,7 +30,7 @@ impl Rng {
             let at = self.below(v.len() + 1);
             match self.below(7) {
                 0 if at < v.len() => v[at] ^= 1 << self.below(8),
-                1 => v.insert(at, self.next() as u8),
+                1 => v.insert(at, self.next_u64() as u8),
                 2 if at < v.len() => {
                     v.remove(at);
                 }

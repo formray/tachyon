@@ -18,15 +18,19 @@ pub fn open_shared(path: &Path) -> std::io::Result<File> {
     o.open(path)
 }
 
-/// Last `n` bytes of a file, decoded (UTF-8 or UTF-16LE).
+/// Most bytes read from one log per poll, whatever `tail_bytes` says.
+pub const MAX_TAIL: u64 = 8 << 20;
+
+/// Last `n` bytes of a file (at most `MAX_TAIL`), decoded (UTF-8 or UTF-16LE).
 pub fn tail(path: &Path, n: u64) -> std::io::Result<String> {
+    let n = n.min(MAX_TAIL);
     let mut f = open_shared(path)?;
     let len = f.metadata()?.len();
     let start = len.saturating_sub(n);
     // keep UTF-16 alignment
     let start = start - (start % 2);
     f.seek(SeekFrom::Start(start))?;
-    let mut buf = Vec::with_capacity((len - start) as usize);
+    let mut buf = Vec::with_capacity((len - start).min(n + 2) as usize);
     f.take(n + 2).read_to_end(&mut buf)?;
     Ok(parse::decode(&buf))
 }
@@ -35,7 +39,7 @@ pub fn tail(path: &Path, n: u64) -> std::io::Result<String> {
 pub fn head(path: &Path, n: u64) -> std::io::Result<String> {
     let f = open_shared(path)?;
     let mut buf = Vec::new();
-    f.take(n).read_to_end(&mut buf)?;
+    f.take(n.min(MAX_TAIL)).read_to_end(&mut buf)?;
     Ok(parse::decode(&buf))
 }
 

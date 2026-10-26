@@ -353,7 +353,10 @@ pub fn save(dir: &Path, r: &Report) -> std::io::Result<()> {
 }
 
 pub fn load(dir: &Path) -> Option<Report> {
-    serde_json::from_slice(&std::fs::read(dir.join(REPORT_FILE)).ok()?).ok()
+    use std::io::Read;
+    let mut buf = Vec::new();
+    std::fs::File::open(dir.join(REPORT_FILE)).ok()?.take(4 << 20).read_to_end(&mut buf).ok()?;
+    serde_json::from_slice(&buf).ok()
 }
 
 /// Remember that Hex has told the user.

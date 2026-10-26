@@ -79,7 +79,7 @@ fn attr(xml: &str, tag: &str, attr: &str) -> Option<String> {
     let start = xml.find(&format!("<{tag} ")).or_else(|| xml.find(&format!("<{tag}\t")))?;
     let el = &xml[start..start + xml[start..].find('>')?];
     let k = el.find(&format!("{attr}="))? + attr.len() + 1;
-    let q = el[k..].chars().next()?;
+    let q = el.get(k..)?.chars().next().filter(|c| *c == '\'' || *c == '"')?;
     let rest = &el[k + 1..];
     Some(rest[..rest.find(q)?].to_string())
 }

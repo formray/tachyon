@@ -231,9 +231,10 @@ fn ring_path(dir: &Path, which: &str) -> PathBuf {
 
 /// Read every valid record of a ring file, oldest first.
 pub fn read_ring(path: &Path) -> Vec<Sample> {
-    let Ok(mut f) = File::open(path) else { return vec![] };
+    let Ok(f) = File::open(path) else { return vec![] };
     let mut buf = Vec::new();
-    if f.read_to_end(&mut buf).is_err() || buf.len() < HEADER || &buf[..8] != MAGIC {
+    // 60 minutes at 1 s are about 0.7 MB; anything far bigger is not ours
+    if f.take(MAX_RING_BYTES).read_to_end(&mut buf).is_err() || buf.len() < HEADER || &buf[..8] != MAGIC {
         return vec![];
     }
     let mut v: Vec<(u32, Sample)> = buf[HEADER..].as_chunks::<REC>().0.iter().filter_map(|c| decode(c)).collect();
@@ -249,8 +250,15 @@ pub fn read_current(dir: &Path) -> Vec<Sample> {
     }
 }
 
+/// Largest ring file read back.
+pub const MAX_RING_BYTES: u64 = 8 << 20;
+
 pub fn read_session(dir: &Path) -> Option<Session> {
-    serde_json::from_str(&std::fs::read_to_string(dir.join("session.json")).ok()?).ok()
+    let mut text = String::new();
+    File::open(dir.join("session.json")).ok()?.take(64 << 10).read_to_string(&mut text).ok()?;
+    let s: Session = serde_json::from_str(&text).ok()?;
+    // only ever one of our two ring files, never another path
+    matches!(s.file.as_str(), "a" | "b").then_some(s)
 }
 
 fn write_session(dir: &Path, s: &Session) -> std::io::Result<()> {

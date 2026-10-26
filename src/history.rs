@@ -439,12 +439,32 @@ pub fn append(dir: &Path, r: &JobRecord) -> std::io::Result<()> {
     f.write_all(&line)
 }
 
+/// Longest job line kept; a damaged longer line is skipped.
+const MAX_LINE: usize = 64 << 10;
+
+/// Every readable job of one file: a damaged line (bad JSON, bad UTF-8, huge) is skipped,
+/// the lines after it still count. Reads at most twice the rotation size.
 fn read_file(p: &Path, out: &mut Vec<JobRecord>) {
-    if let Ok(f) = std::fs::File::open(p) {
-        for line in std::io::BufReader::new(f).lines().map_while(Result::ok) {
-            if let Ok(r) = serde_json::from_str(&line) {
-                out.push(r);
+    use std::io::Read;
+    let Ok(f) = std::fs::File::open(p) else { return };
+    let mut r = std::io::BufReader::new(f.take(2 * MAX_FILE_BYTES));
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        match r.by_ref().take(MAX_LINE as u64 + 1).read_until(b'\n', &mut line) {
+            Ok(0) | Err(_) => return,
+            Ok(_) => {}
+        }
+        if line.len() > MAX_LINE && line.last() != Some(&b'\n') {
+            // skip the rest of an over-long line
+            let mut sink = Vec::new();
+            if r.read_until(b'\n', &mut sink).is_err() {
+                return;
             }
+            continue;
+        }
+        if let Ok(rec) = serde_json::from_slice(&line) {
+            out.push(rec);
         }
     }
 }
