@@ -66,9 +66,29 @@ fn stage_a_chunks_win_over_job_log() {
     let v = scan::current_job(&scan::discover(&c.render_roots, c.scan_depth), &c);
     assert_eq!(v.job, "demo4k · 02x 169 try 1");
     assert_eq!(v.stage.as_deref(), Some("stage A render · 2/4 chunks"));
-    let p = v.progress.unwrap();
+    let p = v.progress.clone().unwrap();
     assert_eq!((p.frame, p.total), (876, Some(1420)));
     assert!(!v.idle);
+    // what the pre-render check matches on
+    let h = scan::job_hints(&v);
+    assert_eq!(h.project.as_deref(), Some("demo4k"));
+    assert_eq!(h.resolution.as_deref(), Some("4K"), "from the name");
+    assert_eq!(h.frames, Some(1420));
+    let _ = std::fs::remove_dir_all(&r);
+}
+
+#[test]
+fn job_hints_read_the_resolution_from_the_log_head() {
+    let r = tree("h");
+    let m = r.join("projects/teaser");
+    std::fs::create_dir_all(m.join("logs")).unwrap();
+    let log = b"ffmpeg version 7.1\nInput #0, mov, from 'in.mov':\n  Stream #0:0: Video: prores, yuv422p10le, 1920x1080, 25 fps\nStream mapping:\n  Stream #0:0 -> #0:0\nOutput #0, mp4, to 'out.mp4':\n  Stream #0:0: Video: hevc_nvenc, p010le, 3840x2160, q=2-31, 25 fps\nframe=  120 fps= 24 q=28.0 size=1024kB time=00:00:05.00 bitrate=1677.7kbits/s speed=1.0x\n";
+    put_bytes(&m.join("logs/master.log"), log, ago(1));
+    let c = cfg(&r);
+    let v = scan::current_job(&scan::discover(&c.render_roots, c.scan_depth), &c);
+    assert_eq!(v.job, "teaser · master");
+    let h = scan::job_hints(&v);
+    assert_eq!((h.project.as_deref(), h.resolution.as_deref()), (Some("teaser"), Some("4K")), "the output size, not the input");
     let _ = std::fs::remove_dir_all(&r);
 }
 

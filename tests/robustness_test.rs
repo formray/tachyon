@@ -27,13 +27,14 @@ fn inputs(rng: &mut Rng, seeds: &[&[u8]]) -> Vec<u8> {
 
 #[test]
 fn log_parsers_take_anything() {
-    let seeds: [&[u8]; 6] = [
+    let seeds: [&[u8]; 7] = [
         b"frame=  120 fps= 24 q=28.0 size=1024kB time=00:00:05.00 bitrate=1677.7kbits/s speed=1.0x\n",
         b"12:01:02 start 02x 169 try 1 NF=1420\n> python prepare.py\nframe 10/1420\n",
         b"  Duration: 00:01:00.00, start: 0.000000, bitrate: 1000 kb/s\n    Stream #0:0: Video: h264, 24 fps\n",
         b"{\"frame\": 10, \"total\": 100, \"fps\": 2.5, \"stage\": \"render\"}",
         b"\xff\xfe1\x002\x00/\x001\x000\x00\n\x00",
         b"744 1.0\n747 2.0\n",
+        b"Stream #0:0: Video: hevc, 3840x2160 -vf scale=1920:1080 demo4k_2160p \xc3\x97 UHD",
     ];
     let mut rng = Rng::new(11);
     let t = Instant::now();
@@ -54,6 +55,7 @@ fn log_parsers_take_anything() {
         let _ = parse::lines(&text).count();
         let _ = parse::eta_secs(rng.next_u64(), rng.next_u64(), f64::from_bits(rng.next_u64()));
         let _ = parse::fmt_dur(f64::from_bits(rng.next_u64()));
+        let _ = parse::resolution_hint(&text).map(parse::resolution_label);
     }
     assert!(t.elapsed().as_secs() < 30);
 }
