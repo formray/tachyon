@@ -7,7 +7,7 @@
     "architecture": {
         "64bit": {
             "url": "https://github.com/formray/tachyon/releases/download/v1.0.1/Tachyon_v1.0.1.zip",
-            "hash": "0000000000000000000000000000000000000000000000000000000000000000"
+            "hash": "f9324001ba3edb92f548de0048f4b5d9d0aaf5489ac2405ac63fc76f472f7e6c"
         }
     },
     "extract_dir": "Tachyon",
