@@ -20,8 +20,19 @@ fn run_mcp() {
     tachyon::mcp::serve(cfg);
 }
 
+/// DLLs loaded at run time (dwrite, wevtapi) come only from System32, never from the folder
+/// tachyon.exe sits in (a Downloads folder can hold anything). NVML is loaded by full path.
+#[cfg(windows)]
+fn safe_dll_search() {
+    use windows_sys::Win32::System::LibraryLoader::{LOAD_LIBRARY_SEARCH_SYSTEM32, SetDefaultDllDirectories};
+    unsafe {
+        SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32);
+    }
+}
+
 #[cfg(windows)]
 fn main() {
+    safe_dll_search();
     if mcp_requested() {
         tachyon::crashlog::install("mcp", |_| {});
         return run_mcp();
