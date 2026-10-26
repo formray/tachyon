@@ -129,3 +129,97 @@ fn write_demo_data() {
     }
     println!("demo data in {}", dir.display());
 }
+
+/// 1.1 crash diagnosis screenshot: `TACHYON_DEMO_DIR=<data folder> cargo test --test demo_data
+/// write_demo_diagnosis -- --ignored` writes a crash report like the real case behind the
+/// feature (NVIDIA driver resets, then a 0x1A bug check while python.exe held most of the VRAM,
+/// with EXPO 6000 RAM and a +1000 MHz memory offset) as an unannounced last report. The
+/// blackbox has no unclean session, so the next start shows this report as it is.
+#[test]
+#[ignore]
+fn write_demo_diagnosis() {
+    use tachyon::events::{KERNEL_POWER, SysEvent, WER_SYSTEM};
+    let dir = std::path::PathBuf::from(std::env::var("TACHYON_DEMO_DIR").expect("set TACHYON_DEMO_DIR"));
+    let bb = dir.join("blackbox");
+    let _ = std::fs::remove_dir_all(&bb);
+    let tmp = std::env::temp_dir().join(format!("tachyon_demo_diag_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let now = tachyon::telemetry::now_ms();
+    let n = 600;
+    let end = now - 25 * 60_000;
+    let start = end - (n - 1) * 1000;
+    let (mut rec, _) = Recorder::open(&tmp, 15, 1000, start).unwrap();
+    for i in 0..n {
+        let mut s = sample(start + i * 1000, i, n);
+        s.temp = Some(64 + (i % 3) as u8); // cool: heat is ruled out
+        s.throttle = Some(0);
+        rec.push(&s, start + i * 1000);
+    }
+    rec.write_pending(end).unwrap();
+    drop(rec);
+    let (_r, prev) = Recorder::open(&tmp, 15, 1000, now).unwrap();
+    let prev = prev.expect("the unclean session");
+    let ev = |dt_s: i64, provider: &str, id: u32, level: u8, code: Option<&str>| SysEvent {
+        t_ms: end + dt_s * 1000,
+        provider: provider.into(),
+        id,
+        level,
+        code: code.map(Into::into),
+    };
+    let events = vec![
+        ev(-300, "nvlddmkm", 153, 2, None),
+        ev(-120, "nvlddmkm", 153, 2, None),
+        ev(-20, "nvlddmkm", 153, 2, None),
+        ev(60, KERNEL_POWER, 41, 1, Some("0x0000001A")),
+        ev(70, WER_SYSTEM, 1001, 2, Some("0x0000001a")),
+    ];
+    let ctx = tachyon::diagnose::Context {
+        oc: Some(tachyon::nvml::OcInfo {
+            core_offset_mhz: Some(0),
+            mem_offset_mhz: Some(1000),
+            power_limit_w: Some(360.0),
+            default_power_limit_w: Some(360.0),
+            rated_boost_mhz: Some(2617),
+        }),
+        oc_after: false,
+        ram: Some(tachyon::sysinfo::RamSpeed { kind: "DDR5".into(), rated_mts: Some(4800), configured_mts: Some(6000), modules: 2 }),
+    };
+    let r = tachyon::report::build_with(&prev, Some(end + 50_000), Ok(events), now - 20 * 60_000, &ctx).expect("a report");
+    assert!(r.diagnosis.is_some());
+    tachyon::report::save(&bb, &r).unwrap();
+    let _ = std::fs::remove_dir_all(&tmp);
+    println!("{}", r.to_text());
+}
+
+/// 1.1 pre-render check screenshots: three earlier 4K runs of "demo4k" that needed ~15.2 GB
+/// each, so a new run with ~14 GB free is flagged before it runs out of memory.
+#[test]
+#[ignore]
+fn write_demo_preflight_history() {
+    let dir = std::path::PathBuf::from(std::env::var("TACHYON_DEMO_DIR").expect("set TACHYON_DEMO_DIR"));
+    let h = dir.join("history");
+    let _ = std::fs::remove_dir_all(&h);
+    let now = tachyon::telemetry::now_ms();
+    let day = 86_400_000;
+    for (k, own) in [15_480.0f32, 15_560.0, 15_610.0].into_iter().enumerate() {
+        let mut j = job(
+            &format!("demo4k try {k}"),
+            JobKind::Render,
+            now - (3 - k as i64) * day,
+            30.0 + k as f64,
+            96.0,
+            180.0,
+            2.0,
+            "GPU-bound (93%)",
+        );
+        j.peak_vram_mb = Some(own + 180.0);
+        j.profile = history::JobProfile {
+            hints: history::JobHints { project: Some("demo4k".into()), resolution: Some("4K".into()), frames: Some(1420) },
+            own_vram_mb: Some(own),
+            start_vram_mb: Some(900.0),
+            vram_total_mb: Some(16303.0),
+        };
+        history::record(&h, j).unwrap();
+    }
+    println!("history in {}", h.display());
+}

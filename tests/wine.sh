@@ -2,16 +2,24 @@
 # Wine smoke harness for Tachyon (build box only, never shipped).
 # usage: wine.sh start | procs | run <dir> [env...] | stop
 set -e
-export WINEPREFIX=/tmp/tachyon-wine/wp WINEDEBUG=-all DISPLAY=:77
+# Another prefix/display/work folder (to run beside a session on :77):
+#   WINEPREFIX=/tmp/x/wp TDISPLAY=:78 TT=/tmp/x-work tests/wine.sh start
+export WINEPREFIX=${WINEPREFIX:-/tmp/tachyon-wine/wp} WINEDEBUG=-all DISPLAY=${TDISPLAY:-:77}
 F=$WINEPREFIX/drive_c/rmfake
-TT=/tmp/tachyon-work
+TT=${TT:-/tmp/tachyon-work}
+D=${DISPLAY#:}
 case "$1" in
 start)
-  pgrep -f "Xvfb :77" >/dev/null || (Xvfb :77 -screen 0 1600x1000x24 +extension Composite >/dev/null 2>&1 &) ; sleep 1
+  mkdir -p $F/pids
+  pgrep -f "Xvfb :$D " >/dev/null || (Xvfb :$D -screen 0 1600x1000x24 +extension Composite >/dev/null 2>&1 &) ; sleep 1
   # busy wallpaper + a compositor, so layered per-pixel alpha is really blended (proves: no rectangle)
   hsetroot -fill ${WALL:-/tmp/tachyon-work/wall_demo.jpg} >/dev/null 2>&1 || true
-  # only our own compositor on :77 (other desktops on this machine run theirs)
-  pgrep -f "picom --backend xrender --no-fading-openclose" >/dev/null || (picom --backend xrender --no-fading-openclose --shadow-exclude "class_g ~= '.*'" >/dev/null 2>&1 &)
+  # only our own compositor on this display (other desktops on this machine run theirs)
+  if [ "$D" = 77 ]; then
+    pgrep -f "picom --backend xrender --no-fading-openclose" >/dev/null || (picom --backend xrender --no-fading-openclose --shadow-exclude "class_g ~= '.*'" >/dev/null 2>&1 &)
+  elif ! { [ -f $TT/picom.pid ] && kill -0 "$(cat $TT/picom.pid)" 2>/dev/null; }; then
+    picom --backend xrender --no-fading-openclose --shadow-exclude "class_g ~= '.*'" >/dev/null 2>&1 & echo $! > $TT/picom.pid
+  fi
   cp $TT/nvml.dll $WINEPREFIX/drive_c/windows/system32/nvml.dll  # built from tests/fake_nvml_v4.c
   for p in Steam/steam.exe Game/Cyberpunk2077.exe ComfyUI/ComfyUI.exe ComfyUI/python_embeded/python.exe Tools/Helper.exe \
            py/python.exe ffmpeg/ffmpeg.exe OBS/obs64.exe Chrome/chrome.exe Win/dwm.exe; do cp $TT/sleeper.exe $F/$p; done
@@ -32,5 +40,7 @@ procs)
      "$(pid obs) -1 G 3 41 18" "$(pid chrome) -1 G 6 0 4" "$(pid ffmpeg) 296 G 2 0 26" "$(pid dwm) -1 G 0 0 0" \
      "$(pid steam) -1 G 0 0 0" "$(pid helper) -1 G 1 0 0" > $F/procs.txt
   cat $F/procs.txt ;;
-stop) wineserver -k || true; pkill -f "picom --backend xrender --no-fading-openclose" || true; pkill -f "Xvfb :77" || true ;;
+stop) wineserver -k || true
+  if [ "$D" = 77 ]; then pkill -f "picom --backend xrender --no-fading-openclose" || true; else [ -f $TT/picom.pid ] && kill "$(cat $TT/picom.pid)" 2>/dev/null; rm -f $TT/picom.pid; fi
+  pkill -f "Xvfb :$D " || true ;;
 esac
