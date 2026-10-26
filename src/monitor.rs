@@ -259,6 +259,8 @@ pub struct Sampler {
     start: Instant,
     nvml: Option<Nvml>,
     last_try: Option<Instant>,
+    /// When the driver last dropped the GPU (faster reconnect for a minute).
+    lost_at: Option<Instant>,
     err: Option<String>,
     cur_sel: u32,
     rs: RenderState,
@@ -284,6 +286,7 @@ impl Sampler {
             start: Instant::now(),
             nvml: None,
             last_try: None,
+            lost_at: None,
             err: None,
             cur_sel: u32::MAX,
             rs: RenderState { cands: vec![], last_scan: None, rate: Default::default() },
@@ -328,7 +331,9 @@ impl Sampler {
     pub fn tick(&mut self) {
         let t0 = Instant::now();
         let t = (t0 - self.start).as_secs_f64();
-        if self.nvml.is_none() && self.last_try.is_none_or(|l| t0 - l > Duration::from_secs(10)) {
+        // after a driver reset retry every 2 s for a minute, otherwise every 10 s
+        let every = if self.lost_at.is_some_and(|l| t0 - l < Duration::from_secs(60)) { 2 } else { 10 };
+        if self.nvml.is_none() && self.last_try.is_none_or(|l| t0 - l >= Duration::from_secs(every)) {
             self.last_try = Some(t0);
             match Nvml::open() {
                 Ok(mut n) => {
@@ -336,7 +341,13 @@ impl Sampler {
                     self.nvml = Some(n);
                     self.err = None;
                 }
-                Err(e) => self.err = Some(e),
+                Err(e) => {
+                    self.err = Some(if every == 2 {
+                        "The NVIDIA driver restarted or the GPU stopped answering. Reconnecting…".into()
+                    } else {
+                        crate::nvml::friendly(&e)
+                    })
+                }
             }
         }
         let mut sel = self.selected;
@@ -348,7 +359,17 @@ impl Sampler {
             if sel != self.cur_sel {
                 n.reset_cache();
             }
-            sample = Some(n.sample(sel));
+            let g = n.sample(sel);
+            if n.lost {
+                // driver reset (TDR), driver update or GPU lost: drop this NVML session and reopen
+                self.nvml = None;
+                self.lost_at = Some(t0);
+                self.last_try = Some(t0);
+                self.err = Some("The NVIDIA driver restarted or the GPU stopped answering. Reconnecting…".into());
+            } else {
+                self.lost_at = self.lost_at.filter(|l| t0 - *l < Duration::from_secs(60));
+                sample = Some(g);
+            }
         }
         // process attribution: Toolhelp snapshot only when there are GPU processes, every N s
         let mut procs = None;

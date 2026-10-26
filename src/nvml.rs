@@ -180,6 +180,31 @@ pub struct Nvml {
     pub pcie: bool,
     pcie_phase: bool,
     pcie_last: (Option<f64>, Option<f64>),
+    /// The driver said the GPU is gone (driver reset/TDR, update, GPU lost): reopen NVML.
+    pub lost: bool,
+}
+
+/// NVML return codes that mean "this session is dead", not "this metric is missing".
+pub fn is_lost(code: Ret) -> bool {
+    matches!(code, 1 | 9 | 12 | 15 | 16 | 17 | 18 | 999)
+}
+
+/// What a failed start means, in words for anyone (shown in the panel).
+pub fn friendly(err: &str) -> String {
+    let e = err.to_ascii_lowercase();
+    if e.contains("no nvidia gpu") {
+        "No NVIDIA graphics card found. Tachyon reads NVIDIA cards only (AMD and Intel are not supported).".into()
+    } else if e.contains("nvmlinit missing") || e.contains("no device handle") {
+        "This NVIDIA driver is too old for Tachyon. Update the driver from nvidia.com or Windows Update.".into()
+    } else if e.contains("nvmlinit = 9") || e.contains("nvmlinit = 12") {
+        "The NVIDIA driver is not running. Restart the PC, or reinstall the driver from nvidia.com.".into()
+    } else if e.contains("nvmlinit = 18") {
+        "The NVIDIA driver was just updated. Restart the PC to finish the update.".into()
+    } else if e.contains("nvmlinit") {
+        format!("The NVIDIA driver did not answer ({err}). Tachyon keeps trying.")
+    } else {
+        "No NVIDIA driver found (nvml.dll is missing). Tachyon needs an NVIDIA graphics card with its driver installed.".into()
+    }
 }
 
 const NVML_TEMPERATURE_GPU: c_uint = 0;
@@ -290,6 +315,7 @@ impl Nvml {
             pcie: true,
             pcie_phase: false,
             pcie_last: (None, None),
+            lost: false,
         };
         unsafe {
             if let Some(f) = me.api.driver {
@@ -338,6 +364,9 @@ impl Nvml {
             return false;
         }
         let r = f();
+        if is_lost(r) {
+            self.lost = true;
+        }
         if r == NOT_SUPPORTED || r == FUNCTION_NOT_FOUND {
             self.unsupported.entry(idx).or_default().insert(key);
         }
@@ -597,6 +626,22 @@ impl Drop for Nvml {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lost_gpu_codes_and_plain_messages() {
+        for c in [15, 16, 18, 1, 9, 999] {
+            assert!(is_lost(c), "{c}");
+        }
+        for c in [0, 3, 13, 2, 7] {
+            assert!(!is_lost(c), "{c} is a missing metric, not a lost GPU");
+        }
+        assert!(friendly("no NVIDIA GPU found").contains("NVIDIA cards only"));
+        assert!(friendly("nvml not found").contains("nvml.dll is missing"));
+        assert!(friendly("LoadLibraryExW failed").contains("driver installed"));
+        assert!(friendly("nvmlInit missing").contains("too old"));
+        assert!(friendly("nvmlInit = 9").contains("not running"));
+        assert!(friendly("nvmlInit = 18").contains("Restart the PC"));
+    }
     #[test]
     fn throttle_reason_words() {
         assert!(throttle_words(0).is_empty());

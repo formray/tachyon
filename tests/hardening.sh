@@ -52,5 +52,15 @@ single() {
   c=$(wine tasklist 2>/dev/null | grep -ci tachyon.exe)
   [ "$c" = "2" ] && ok "TACHYON_CONFIG gives a separate instance" || bad "tasklist shows $c"
   stop; }
-case "${1:-all}" in all) first; corrupt; panic; single;; *) "$1";; esac
+tdr() {
+  echo "== driver reset mid-run (fake GPU_IS_LOST), then no driver at all"; stop; printf "mode = 'panel'\n" > $R/tachyon.toml
+  SCN=$WINEPREFIX/drive_c/rmfake/scenario.txt; mkdir -p $(dirname $SCN); rm -f $SCN
+  T=60 run env; sleep 8; snap tdr_before
+  echo lost > $SCN; sleep 5; snap tdr_lost
+  rm -f $SCN; sleep 6; snap tdr_back
+  pgrep -f tachyon.exe >/dev/null && ok "still running after the reset" || bad "exited"
+  stop; echo nodriver > $SCN
+  run env; sleep 8; snap no_driver; rm -f $SCN
+  stop; }
+case "${1:-all}" in all) first; corrupt; panic; single; tdr;; *) "$1";; esac
 echo "fails: $fails"; exit $fails

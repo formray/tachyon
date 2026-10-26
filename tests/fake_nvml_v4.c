@@ -15,22 +15,23 @@ typedef struct { unsigned pid; unsigned long long ts; unsigned sm, mem, enc, dec
 #define EXP __declspec(dllexport)
 static double T(void){ return GetTickCount64()/1000.0; }
 static int idx(void*d){ return (int)(size_t)d - 1; }
-/* scenario: 0 none, 1 decode, 2 ramp, 3 idle, 4 busy, 5 hot; t0 = when it started */
+/* scenario: 0 none, 1 decode, 2 ramp, 3 idle, 4 busy, 5 hot, 6 lost (GPU_IS_LOST like a TDR),
+   7 nodriver (nvmlInit = DRIVER_NOT_LOADED); t0 = when it started */
 static int SC; static double SC_T0, SC_READ = -10;
 static int sc(void){ double t=T(); if(t-SC_READ>=1.0){ SC_READ=t; char w[32]={0}; FILE*f=fopen("C:\\rmfake\\scenario.txt","r"); int n=0;
-  if(f){ if(fscanf(f,"%31s",w)==1){ n= !strcmp(w,"decode")?1: !strcmp(w,"ramp")?2: !strcmp(w,"idle")?3: !strcmp(w,"busy")?4: !strcmp(w,"hot")?5:0; } fclose(f); }
+  if(f){ if(fscanf(f,"%31s",w)==1){ n= !strcmp(w,"decode")?1: !strcmp(w,"ramp")?2: !strcmp(w,"idle")?3: !strcmp(w,"busy")?4: !strcmp(w,"hot")?5: !strcmp(w,"lost")?6: !strcmp(w,"nodriver")?7:0; } fclose(f); }
   if(n!=SC){ SC=n; SC_T0=t; } } return SC; }
 static double ramp_mb(void){ return sc()==2 ? 25.0*(T()-SC_T0) : 0.0; }
-EXP int nvmlInit_v2(void){return 0;}
+EXP int nvmlInit_v2(void){ SC_READ=-10; return sc()==7 ? 9 : 0;}
 EXP int nvmlShutdown(void){return 0;}
 EXP int nvmlDeviceGetCount_v2(unsigned*n){*n=2;return 0;}
 EXP int nvmlSystemGetDriverVersion(char*b,unsigned n){strncpy(b,"581.57",n);return 0;}
 EXP int nvmlDeviceGetHandleByIndex_v2(unsigned i, void**d){ if(i>1) return 2; *d=(void*)(size_t)(i+1); return 0;}
 EXP int nvmlDeviceGetName(void*d,char*b,unsigned n){strncpy(b, idx(d)==0?"FAKE GeForce RTX 5080":"FAKE GeForce RTX 3060", n);return 0;}
-EXP int nvmlDeviceGetUtilizationRates(void*d,U*u){double t=T(); int s=sc();
+EXP int nvmlDeviceGetUtilizationRates(void*d,U*u){double t=T(); int s=sc(); if(s==6||s==7) return 15;
   u->gpu = s==1?(unsigned)(38+3*sin(t)) : s==3?1 : (s==4||s==5)?(unsigned)(96+2*sin(t)) : (unsigned)(79+6*sin(t/4)+3*sin(t*1.3));
   u->memory=(unsigned)(41+8*sin(t/5)); return 0;}
-EXP int nvmlDeviceGetTemperature(void*d,unsigned s_,unsigned*t){int s=sc(); *t = s==3?45 : s==5?(unsigned)(87+sin(T())) : s==4?76 : (unsigned)(78+3.5*sin(T()/9));return 0;}
+EXP int nvmlDeviceGetTemperature(void*d,unsigned s_,unsigned*t){int s=sc(); if(s==6||s==7) return 15; *t = s==3?45 : s==5?(unsigned)(87+sin(T())) : s==4?76 : (unsigned)(78+3.5*sin(T()/9));return 0;}
 EXP int nvmlDeviceGetMemoryInfo(void*d,M*m){m->total=16303ULL<<20; double u = sc()==2 ? 8000+ramp_mb() : 11134+900*sin(T()/7); if(u>16250) u=16250;
   m->used=(unsigned long long)(u*1048576.0);m->free=m->total-m->used;return 0;}
 /* _v2 (nvidia-smi's call): `used` without the 326 MiB the driver reserves; v1 above counts it as used */

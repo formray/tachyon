@@ -1851,10 +1851,11 @@ impl App {
             }
             None => {
                 g.text_t("—", x0, hero_base, Face::SansLight, 96.0, 0.0, T_AMBER, H::L, V::Base);
-                g.cap("NVML UNAVAILABLE · RETRYING EVERY 10 S", x0, FIELD_H - 24.0, 10.0, H::L, V::Base);
+                g.cap("NO GPU READINGS · TACHYON KEEPS TRYING", x0, FIELD_H - 24.0, 10.0, H::L, V::Base);
                 if let Some(e) = s.error.clone() {
-                    let e = g.fit(&e, Face::Sans, 11.0, lw - 2.0 * x0);
-                    g.text(&e, x0, 96.0, Face::Sans, 11.0, TEXT2, H::L, V::Base);
+                    for (i, line) in views::wrap_g(g, &e, Face::Sans, 11.0, lw - 2.0 * x0, 2).iter().enumerate() {
+                        g.text(line, x0, 96.0 + 15.0 * i as f32, Face::Sans, 11.0, TEXT2, H::L, V::Base);
+                    }
                 }
             }
         }
@@ -1971,7 +1972,8 @@ impl App {
         };
         match &s.procs {
             None => {
-                g.stat(|g| g.text("process list not supported by this card/driver", x0, y + 16.0, Face::Sans, 12.0, TEXT2, H::L, V::Base));
+                let msg = if s.sample.is_none() { "no GPU readings yet" } else { "process list not supported by this card/driver" };
+                g.stat(|g| g.text(msg, x0, y + 16.0, Face::Sans, 12.0, TEXT2, H::L, V::Base));
                 y += 28.0;
             }
             Some(_) if vis.is_empty() => {
