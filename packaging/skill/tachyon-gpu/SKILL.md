@@ -13,7 +13,7 @@ metadata:
 # Tachyon GPU
 
 Tachyon is a lightweight, read-only NVIDIA GPU monitor for Windows. Its MCP server
-(`tachyon.exe mcp`, stdio) gives you seven read-only tools about **this PC's** GPU.
+(`tachyon.exe mcp`, stdio) gives you read-only tools (twelve in 1.2) about **this PC's** GPU.
 Nothing you call can change clocks, fans, power limits, processes or files.
 
 ## Before you start
@@ -41,6 +41,9 @@ Nothing you call can change clocks, fans, power limits, processes or files.
 | "Will this render fit in VRAM?", before starting a big job | `preflight` (optional `name`, `resolution`, `project`, `frames`) | Quote the sentence, the fit (`fits`/`tight`/`wont_fit`/`unknown`) and confidence; pass on `hog_note` if any |
 | "How did my last renders go?" | `get_history` (`n` 1-100) | Table of jobs: duration, average GPU, peak VRAM, energy (Wh), throttling |
 | "Was this render faster than last time?" | `compare_last_run` (optional `name`) | Say faster/slower by how much and the likely reason from the comparison |
+| "How did the job my script marked go?" (Tachyon 1.2) | `get_job_reports` (`n`, optional `name`) | Quote `sentence`; give duration, average/peak GPU, VRAM peak, energy, `power_limited_s`/`thermal_limited_s` and the PCIe link; list `open` jobs |
+| "Who was using VRAM at 18:20?", "what filled the card?" (1.2) | `get_process_vram` (`minutes`, or `since`/`until`; optional `name`, `top`) | Top processes by peak with their average and when; use `timeline` for when it grew |
+| "Is my GPU's PCIe link OK?", riser or slot questions (1.2) | `get_pcie_link` (`days`, `n`) | Give `summary`; idle downshifts (`idle_saving`) are normal; only `degraded_*` changes are a problem |
 
 Only ask for `include_samples: true` on `get_blackbox` when the user wants raw data;
 the summary is usually enough and much smaller.
@@ -63,6 +66,13 @@ the summary is usually enough and much smaller.
   a test to try (e.g. RAM one step slower), not an instruction; Tachyon changes nothing.
 - **Preflight**: `unknown` means not enough comparable history; say so instead of guessing.
   `need_mb` is what the job itself needed before, `free_mb` what other apps leave now.
+- **Last seconds (1.2)**: `diagnose_crash.last_seconds` holds 100 ms readings of the 30 s
+  before the stop. A big `biggest_power_jump` or power brake right before a power-off is
+  worth passing on; say it is a sign, not proof.
+- **PCIe link (1.2)**: a lower generation while idle is normal power saving. Mention the
+  link only when it is degraded (narrower than the slot, or a lower generation under load).
+- **Job markers (1.2)**: the MCP server cannot start or end a marked job; the user's
+  render script runs `tachyon mark start|end --job NAME`. Tell them how if they ask.
 - **Energy**: `energy_wh` is measured by the GPU (whole-board). A cost appears only if the
   user set `price_per_kwh`.
 - `source` tells you whether the data came from the running Tachyon (`tachyon`) or a short

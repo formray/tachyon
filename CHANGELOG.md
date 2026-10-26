@@ -1,5 +1,38 @@
 # Changelog
 
+## v1.2.0 (unreleased)
+
+Four additions for render machines, all read-only like before. Draft: the version in Cargo.toml and the packaging files is still 1.1.0 until the release is prepared.
+
+**Fast sampling (100 ms) for the moments before a stop**
+- A small thread of its own reads the SM and memory clocks, power and power limit, temperature, GPU load, the clock-limit (throttle) reasons and the PCIe link every 100 ms (`fast_ms`, 50-1000) into a second fixed-size ring next to the flight recorder: `blackbox/fast_a.bin` / `fast_b.bin` (`TACHYFS1`, 40-byte records with a checksum), 15 minutes by default (`fast_minutes`, 1-60), about 352 KB per session. Written every second, flushed every 5 s, so a power cut loses at most a few seconds. `fast_sampling = false` turns it off.
+- `diagnose_crash` adds `last_seconds`: the 30 s before the stop at 100 ms (power against the limit, the biggest one-reading power jump, time at the limit, temperature, SM clock and its biggest drop, each clock-limit reason with how long it was set, the PCIe link, the last reading to the millisecond). Power spikes of +100 W within one reading, power brake, hardware slowdown or a hardware temperature limit become `diagnosis.hints`.
+- Job reports keep the 100 ms peaks (peak power, time at the power limit, clock-limited time) without storing the samples.
+
+**PCIe link history**
+- The link's generation and width against the best this GPU and slot can do (the lower of the GPU's and the system's maximum generation, and the maximum width).
+- NVIDIA cards drop to Gen1/Gen2 when idle; that is counted as normal power saving and written now and then. A link narrower than the slot (after 3 s) or below its generation under load (GPU 50%+ for 5 s) is a *degraded* event, always written, as is the recovery. `history/pcie_link.jsonl`, rotated at 1 MB.
+- `get_status.pcie_link`, the new MCP tool `get_pcie_link` (now, the changes of the last days, degraded count), and the bottleneck explainer: an evidence line with the link, and a PCIe verdict says when the link itself runs below its best.
+
+**VRAM per process over time**
+- Every 5 s (`proc_vram_secs`, 0 = off) the VRAM each process holds. On Windows NVML answers "N/A" for every process under WDDM, so Tachyon reads the per-process dedicated GPU memory Task Manager shows (`\GPU Process Memory(*)\Dedicated Usage`, pdh.dll from System32, on the adapter whose total matches the NVIDIA card).
+- A line goes to `history/proc_vram.jsonl` when a process changes by 64 MB or more, comes or goes, or at least once a minute (largest 16 above 16 MB; rotated at 4 MB).
+- The process list now shows each process's VRAM on Windows too; graphics-only processes are listed from 256 MB (they used to be listed with any known VRAM).
+- New MCP tool `get_process_vram` (`minutes`, `since`/`until`, `name`, `top`): peak, time-weighted average and last value per process name, first and last seen, a short timeline for the top five, and the reading now.
+
+**Render job markers**
+- `tachyon mark start --job NAME` and `tachyon mark end --job NAME` append one line to `markers/markers.jsonl` in the data folder and exit (0 written, 1 could not write, 2 wrong arguments; the line is printed to the console it was started from). Nothing else is touched.
+- The running Tachyon follows the file and builds a report per job: duration, average and peak GPU load, memory controller load, VRAM at start / peak / end, average and peak power (100 ms), energy (and cost with `price_per_kwh`), temperature, SM clock range, seconds clock-limited by power and by heat and at the power limit, the clock-limit reasons, the PCIe link at start and end, the lowest seen and degraded events, the processes holding the most VRAM and the most common bottleneck. Jobs started before Tachyon was running are picked up (with `covered_s` saying how much was recorded); a job with no end marker is closed after 48 h; at most 16 open.
+- Reports go to `history/marked_jobs.jsonl`; `get_status.marked_jobs` (open, last, notes) and the new read-only MCP tool `get_job_reports` (`n`, `name`). The MCP server stays read-only: it never writes markers.
+
+**Measured on the RTX 5080 (Windows 11, 32 threads), whole Tachyon process, companion mode, 60 s windows**
+- Idle with fast sampling on: 1.09% of one core (0.034% of the CPU); off: 1.22% (noise: the fast thread costs less than the run-to-run difference). Under GPU load, on: 1.42% of one core. Working set 5-6 MB, private memory 32 MB either way; one extra thread.
+- A marked 60 s GPU job (RIG test render, 1080p CUDA + NVENC): 81% average GPU, 2.3 GB VRAM peak, 247 W average, 262 W peak (100 ms), 4.1 Wh, Gen5 x16 throughout.
+- After Tachyon was killed, the fast ring's last reading was 0.35 s before the kill (the 1 s recorder's last sample 4.4 s before).
+
+**Build and tests**
+- 182 tests on Linux and 186 under wine (169 and 172 in 1.1.0): the fast ring (wrap-around, damaged records, the thread writing and stopping), the last-seconds summary and hints, the link states (idle dance, degraded width and generation, recovery), the per-process VRAM log and summary, the marker CLI and job reports, the three new MCP tools and `diagnose_crash` with 100 ms data.
+
 ## v1.1.0
 
 Two new answers, both worked out from what Tachyon already records. Read-only as before.

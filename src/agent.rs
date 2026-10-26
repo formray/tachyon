@@ -72,6 +72,18 @@ fn status_raw(snap: &Snapshot, source: &str) -> Value {
         "last_job": i.last_job,
         "crash_report": report,
         "data_dir": i.data_dir,
+        "pcie_link": i.pcie,
+        "fast_sampling": i.fast,
+        "marked_jobs": {
+            "open": i.marked_open,
+            "last": i.marked_last,
+            "finished_this_session": i.marked_done,
+            "notes": i.marker_notes,
+        },
+        "process_vram": (!i.proc_vram.is_empty()).then(|| json!({
+            "source": i.proc_vram_source,
+            "top": i.proc_vram.iter().take(8).map(|(n, pid, mb)| json!({ "name": n, "pid": pid, "vram_mb": mb })).collect::<Vec<_>>(),
+        })),
     })
 }
 
@@ -293,7 +305,20 @@ mod tests {
         let mut snap = Snapshot { gpus: vec!["NVIDIA GeForce RTX 5080".into()], driver: "581.57".into(), ..Default::default() };
         snap.insights.latest = Some(crate::telemetry::Sample { util: Some(42), ..Default::default() });
         let v = status(&snap, "tachyon");
-        for k in ["tachyon", "source", "t_ms", "gpu", "reading", "bottleneck", "vram_forecast", "job", "last_job", "crash_report"] {
+        for k in [
+            "tachyon",
+            "source",
+            "t_ms",
+            "gpu",
+            "reading",
+            "bottleneck",
+            "vram_forecast",
+            "job",
+            "last_job",
+            "crash_report",
+            "pcie_link",
+            "marked_jobs",
+        ] {
             assert!(v.get(k).is_some(), "{k}");
         }
         assert_eq!(v["gpu"]["name"], "NVIDIA GeForce RTX 5080");

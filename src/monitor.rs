@@ -212,6 +212,10 @@ pub fn attribute(
         .collect()
 }
 
+/// A graphics-only process holding this much VRAM is listed (1.2: on Windows every process now has
+/// a VRAM figure, so a few MB of desktop surfaces no longer count).
+pub const SHOW_VRAM_MB: f64 = 256.0;
+
 /// GPU process list filter. Hidden by default: desktop shell processes (`hide` patterns) and
 /// graphics-only processes doing nothing measurable. Shown: compute ("C") processes, anything
 /// using more than 1% SM/ENC/DEC, and anything with a known VRAM figure.
@@ -226,7 +230,7 @@ pub fn filter_procs<'a>(v: &'a [ProcView], show_all: bool, hide: &[String]) -> (
             return false;
         }
         let busy = [p.info.sm_pct, p.info.enc_pct, p.info.dec_pct].iter().any(|x| x.is_some_and(|x| x > 1));
-        p.info.kind == "C" || busy || p.info.vram_mb.is_some_and(|m| m > 0.0)
+        p.info.kind == "C" || busy || p.info.vram_mb.is_some_and(|m| m >= SHOW_VRAM_MB)
     };
     let vis: Vec<&ProcView> = v.iter().filter(|p| keep(p)).collect();
     let hidden = v.len() - vis.len();
@@ -299,6 +303,13 @@ pub struct Sampler {
     agent: Option<crate::agent::Publisher>,
     /// When the overclock indicators were last read (once a minute).
     oc_at: Option<(Instant, u32)>,
+    /// Per-process VRAM (1.2): when it was last read, and the figures by pid.
+    pv_at: Option<Instant>,
+    pv: HashMap<u32, f32>,
+    #[cfg(windows)]
+    pdh: Option<crate::procvram::pdh::GpuMem>,
+    #[cfg(windows)]
+    pdh_try: Option<Instant>,
 }
 
 impl Sampler {
@@ -324,6 +335,12 @@ impl Sampler {
             selected: sel,
             engine,
             oc_at: None,
+            pv_at: None,
+            pv: HashMap::new(),
+            #[cfg(windows)]
+            pdh: None,
+            #[cfg(windows)]
+            pdh_try: None,
         }
     }
 
@@ -353,6 +370,43 @@ impl Sampler {
     /// Clean exit: record a running job and mark the flight recorder session clean.
     pub fn close(&mut self) {
         self.engine.close(crate::telemetry::now_ms(), &mut self.snap.insights);
+    }
+
+    /// (name, pid, MB) of every process holding VRAM on the shown GPU. NVML's figures when it has
+    /// them; on Windows (where NVML says "N/A" under WDDM) the per-process counters Task Manager
+    /// uses, matched to this GPU's adapter.
+    #[cfg_attr(not(windows), allow(unused_variables))]
+    fn read_proc_vram(
+        &mut self,
+        g: &GpuSample,
+        procs: Option<&[ProcView]>,
+        t0: Instant,
+    ) -> Option<(Vec<(String, u32, f32)>, &'static str)> {
+        let nv: Vec<(String, u32, f32)> =
+            procs.unwrap_or_default().iter().filter_map(|p| p.info.vram_mb.map(|m| (p.info.name.clone(), p.info.pid, m as f32))).collect();
+        if !nv.is_empty() {
+            return Some((nv, "nvml"));
+        }
+        #[cfg(windows)]
+        {
+            if self.pdh.is_none() && self.pdh_try.is_none_or(|a| t0 - a >= Duration::from_secs(60)) {
+                self.pdh_try = Some(t0);
+                self.pdh = crate::procvram::pdh::GpuMem::open();
+            }
+            let list = self.pdh.as_mut()?.read(g.vram_used_mb)?;
+            let unknown = list.iter().any(|(pid, mb)| *mb >= crate::procvram::MIN_MB && !self.ptable.contains_key(pid));
+            if unknown && self.ptable_at.is_none_or(|a| t0 - a >= Duration::from_secs(2)) {
+                self.ptable = crate::procinfo::win::snapshot();
+                self.ptable_at = Some(t0);
+            }
+            let named = list
+                .into_iter()
+                .map(|(pid, mb)| (self.ptable.get(&pid).map(|(_, n)| n.clone()).unwrap_or_else(|| format!("pid {pid}")), pid, mb))
+                .collect();
+            Some((named, "windows counters"))
+        }
+        #[cfg(not(windows))]
+        None
     }
 
     pub fn tick(&mut self) {
@@ -424,6 +478,23 @@ impl Sampler {
             }
             procs = Some(attribute(list, &self.ptable, &self.cfg.process_rules, &self.cmdlines));
         }
+        // per-process VRAM: every few seconds
+        if let Some(g) = sample.as_ref()
+            && self.cfg.proc_vram_secs > 0
+            && self.pv_at.is_none_or(|a| t0 - a >= Duration::from_secs(self.cfg.proc_vram_secs.clamp(1, 3600)))
+        {
+            self.pv_at = Some(t0);
+            if let Some((list, source)) = self.read_proc_vram(g, procs.as_deref(), t0) {
+                self.pv = list.iter().map(|(_, pid, mb)| (*pid, *mb)).collect();
+                self.engine.set_gpu(sel);
+                self.engine.set_proc_vram(crate::telemetry::now_ms(), list, source, &mut self.snap.insights);
+            }
+        }
+        if let Some(v) = procs.as_mut() {
+            for p in v.iter_mut().filter(|p| p.info.vram_mb.is_none()) {
+                p.info.vram_mb = self.pv.get(&p.info.pid).map(|m| *m as f64);
+            }
+        }
         let render = render_tick(&self.cfg, &mut self.rs, t);
         let s = &mut self.snap;
         if sel != self.cur_sel {
@@ -444,6 +515,7 @@ impl Sampler {
         s.procs = procs;
         s.render = render;
         let job = s.render.as_ref().map(|r| (r.job.as_str(), r.fps));
+        self.engine.set_gpu(sel);
         self.engine.set_hints(s.render.as_ref().map(|r| r.hints.clone()));
         self.engine.tick(s.sample.as_ref(), s.procs.as_deref(), job, crate::telemetry::now_ms(), &mut s.insights);
         s.uptime = t;

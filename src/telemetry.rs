@@ -82,6 +82,15 @@ pub struct Sample {
     /// NVML total energy counter, millijoules.
     pub energy_mj: Option<u64>,
     pub procs: Vec<Proc>,
+    /// PCIe link now and the best the GPU and slot can do (1.2; not kept by the flight recorder).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pcie_gen: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pcie_width: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pcie_gen_max: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pcie_width_max: Option<u8>,
 }
 
 /// Usable one-direction PCIe bandwidth per lane in MB/s for a link generation.
@@ -138,6 +147,10 @@ impl Sample {
             s.dec = u8c(g.dec_pct);
             s.fan = u8c(g.fan_pct);
             s.energy_mj = g.energy_mj;
+            s.pcie_gen = u8c(g.pcie_gen);
+            s.pcie_width = u8c(g.pcie_width);
+            s.pcie_gen_max = u8c(g.pcie_gen_max);
+            s.pcie_width_max = u8c(g.pcie_width_max);
         }
         if let Some(c) = cpu {
             s.cpu = Some(c.total);

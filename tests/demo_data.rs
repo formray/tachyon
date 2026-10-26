@@ -42,6 +42,10 @@ fn sample(t_ms: i64, i: i64, n: i64) -> Sample {
         commit_mb: Some(30_000.0 + 9000.0 * f),
         commit_limit_mb: Some(49_000.0),
         energy_mj: Some(9_000_000_000 + (i as u64) * 340_000),
+        pcie_gen: Some(5),
+        pcie_width: Some(16),
+        pcie_gen_max: Some(5),
+        pcie_width_max: Some(16),
         procs: vec![
             Proc {
                 pid: 7420,

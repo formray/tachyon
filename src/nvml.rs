@@ -124,6 +124,9 @@ struct Api {
     energy: Option<FnU64>,
     link_gen: Option<FnU32>,
     link_width: Option<FnU32>,
+    link_gen_max: Option<FnU32>,
+    link_width_max: Option<FnU32>,
+    gpu_link_gen_max: Option<FnU32>,
     // read now and then for the crash diagnosis (overclock indicators), never set
     gpc_offset: Option<FnI32>,
     mem_offset: Option<FnI32>,
@@ -215,6 +218,9 @@ pub struct GpuSample {
     /// Current PCIe link generation and width (they drop at idle to save power).
     pub pcie_gen: Option<u32>,
     pub pcie_width: Option<u32>,
+    /// The best link the GPU and the slot together can train to (read once per device).
+    pub pcie_gen_max: Option<u32>,
+    pub pcie_width_max: Option<u32>,
     /// None = process listing not supported.
     pub procs: Option<Vec<ProcInfo>>,
 }
@@ -235,6 +241,8 @@ pub struct Nvml {
     pcie_last: (Option<f64>, Option<f64>),
     /// The driver said the GPU is gone (driver reset/TDR, update, GPU lost): reopen NVML.
     pub lost: bool,
+    /// Best PCIe link per device (generation, width), read once.
+    link_max: HashMap<u32, (Option<u32>, Option<u32>)>,
 }
 
 /// NVML return codes that mean "this session is dead", not "this metric is missing".
@@ -350,6 +358,9 @@ impl Nvml {
             energy: sym!("nvmlDeviceGetTotalEnergyConsumption"),
             link_gen: sym!("nvmlDeviceGetCurrPcieLinkGeneration"),
             link_width: sym!("nvmlDeviceGetCurrPcieLinkWidth"),
+            link_gen_max: sym!("nvmlDeviceGetMaxPcieLinkGeneration"),
+            link_width_max: sym!("nvmlDeviceGetMaxPcieLinkWidth"),
+            gpu_link_gen_max: sym!("nvmlDeviceGetGpuMaxPcieLinkGeneration"),
             gpc_offset: sym!("nvmlDeviceGetGpcClkVfOffset"),
             mem_offset: sym!("nvmlDeviceGetMemClkVfOffset"),
             plim_set: sym!("nvmlDeviceGetPowerManagementLimit"),
@@ -374,6 +385,7 @@ impl Nvml {
             pcie_phase: false,
             pcie_last: (None, None),
             lost: false,
+            link_max: HashMap::new(),
         };
         unsafe {
             if let Some(f) = me.api.driver {
@@ -414,6 +426,7 @@ impl Nvml {
     /// Forget cached per-device values (call when switching GPU).
     pub fn reset_cache(&mut self) {
         self.pcie_last = (None, None);
+        self.link_max.clear();
         self.last_proc_ts = 0;
     }
 
@@ -558,9 +571,100 @@ impl Nvml {
                 }
             }
         }
+        (s.pcie_gen_max, s.pcie_width_max) = self.link_max(&a, idx, d);
         s.procs = self.processes(&a, idx, d);
         self.api = a;
         s
+    }
+
+    /// The best PCIe link the GPU and its slot can reach: the lower of the two generations
+    /// (`GetMaxPcieLinkGeneration` is the system's, `GetGpuMaxPcieLinkGeneration` the GPU's own)
+    /// and the maximum width. Read once per device; these do not change while running.
+    fn link_max(&mut self, a: &Api, idx: u32, d: Dev) -> (Option<u32>, Option<u32>) {
+        if let Some(v) = self.link_max.get(&idx) {
+            return *v;
+        }
+        let read = |me: &mut Self, key: &'static str, f: Option<FnU32>| {
+            let f = f?;
+            let mut v = 0;
+            me.try_call(idx, key, || unsafe { f(d, &mut v) }).then_some(v).filter(|v| *v > 0)
+        };
+        let sys = read(self, "lgenmax", a.link_gen_max);
+        let gpu = read(self, "lgengpu", a.gpu_link_gen_max);
+        let width = read(self, "lwidmax", a.link_width_max);
+        let r#gen = match (sys, gpu) {
+            (Some(x), Some(y)) => Some(x.min(y)),
+            (x, y) => x.or(y),
+        };
+        if !self.lost {
+            self.link_max.insert(idx, (r#gen, width));
+        }
+        (r#gen, width)
+    }
+
+    /// One fast reading for device `idx` (the 100 ms sampler): clocks, power, power limit,
+    /// temperature, GPU load, clock-limit reasons and the PCIe link. Nine cheap queries, no
+    /// process list and no PCIe throughput (those take tens of ms).
+    pub fn fast_sample(&mut self, idx: u32, t_ms: i64) -> Option<crate::fast::FastSample> {
+        let &d = self.handles.get(idx as usize)?;
+        let a = std::mem::take(&mut self.api);
+        let mut f = crate::fast::FastSample { t_ms, ..Default::default() };
+        unsafe {
+            if let Some(c) = a.clock {
+                let mut v = 0;
+                if self.try_call(idx, "clkg", || c(d, CLOCK_GRAPHICS, &mut v)) {
+                    f.clk_sm = Some(v.min(65_534) as u16);
+                }
+                let mut v = 0;
+                if self.try_call(idx, "clkm", || c(d, CLOCK_MEM, &mut v)) {
+                    f.clk_mem = Some(v.min(65_534) as u16);
+                }
+            }
+            if let Some(p) = a.power {
+                let mut v = 0;
+                if self.try_call(idx, "power", || p(d, &mut v)) {
+                    f.power_w = Some(v as f32 / 1000.0);
+                }
+            }
+            if let Some(p) = a.power_limit {
+                let mut v = 0;
+                if self.try_call(idx, "plim", || p(d, &mut v)) {
+                    f.power_limit_w = Some(v as f32 / 1000.0);
+                }
+            }
+            if let Some(t) = a.temp {
+                let mut v = 0;
+                if self.try_call(idx, "temp", || t(d, NVML_TEMPERATURE_GPU, &mut v)) {
+                    f.temp = Some(v.min(254) as u8);
+                }
+            }
+            if let Some(u) = a.util {
+                let mut v = Util::default();
+                if self.try_call(idx, "util", || u(d, &mut v)) {
+                    f.util = Some(v.gpu.min(254) as u8);
+                }
+            }
+            if let Some(r) = a.reasons {
+                let mut m = 0;
+                if self.try_call(idx, "thr", || r(d, &mut m)) {
+                    f.throttle = Some(m as u32);
+                }
+            }
+            if let Some(g) = a.link_gen {
+                let mut v = 0;
+                if self.try_call(idx, "lgen", || g(d, &mut v)) {
+                    f.pcie_gen = Some(v.min(254) as u8);
+                }
+            }
+            if let Some(w) = a.link_width {
+                let mut v = 0;
+                if self.try_call(idx, "lwid", || w(d, &mut v)) {
+                    f.pcie_width = Some(v.min(254) as u8);
+                }
+            }
+        }
+        self.api = a;
+        Some(f)
     }
 
     /// Overclock indicators for device `idx` (a few cheap queries; call now and then, not per tick).

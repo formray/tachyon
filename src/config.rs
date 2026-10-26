@@ -49,6 +49,15 @@ pub struct Config {
     /// %LOCALAPPDATA%\Tachyon\blackbox) so a crash or unexpected restart can be explained afterwards.
     pub blackbox: bool,
     pub blackbox_minutes: u32,
+    /// Fast sampling (1.2): clocks, power, power limit, temperature, clock-limit reasons and the
+    /// PCIe link every `fast_ms` (default 100 ms, 50-1000) on a thread of its own, into a second
+    /// fixed-size ring next to the flight recorder covering `fast_minutes` (default 15, 1-60).
+    pub fast_sampling: bool,
+    pub fast_ms: u64,
+    pub fast_minutes: u32,
+    /// Per-process VRAM (1.2): read every this many seconds (default 5, 2-60) and kept in
+    /// %LOCALAPPDATA%\Tachyon\history\proc_vram.jsonl. 0 = off.
+    pub proc_vram_secs: u64,
     /// Record finished render jobs and GPU-busy sessions in %LOCALAPPDATA%\Tachyon\history.
     pub history: bool,
     /// Electricity price per kWh, to show what a job cost. Off when unset.
@@ -429,6 +438,10 @@ impl Default for Config {
             mode: None,
             blackbox: true,
             blackbox_minutes: 15,
+            fast_sampling: true,
+            fast_ms: 100,
+            fast_minutes: 15,
+            proc_vram_secs: 5,
             history: true,
             price_per_kwh: None,
             currency: "EUR".into(),
@@ -487,6 +500,10 @@ impl Config {
     }
     pub fn poll_interval(&self) -> std::time::Duration {
         std::time::Duration::from_millis(self.poll_ms.clamp(250, 2000))
+    }
+    /// Fast sampling period, clamped to 50..=1000 ms.
+    pub fn fast_interval_ms(&self) -> u64 {
+        self.fast_ms.clamp(50, 1000)
     }
 }
 

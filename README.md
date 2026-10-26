@@ -28,6 +28,29 @@ the [changelog](CHANGELOG.md#previews).
 
 ## Features
 
+New in 1.2 (draft, not released yet):
+
+- **100 ms fast sampling.** A small thread reads the clocks, power against the limit,
+  temperature, load, the clock-limit reasons and the PCIe link ten times a second into a
+  second fixed-size ring next to the flight recorder (15 minutes, about 352 KB). After a
+  crash, `diagnose_crash` shows the last 30 s at that resolution (`last_seconds`): a
+  +200 W step within 100 ms, power brake or a hardware slowdown just before the stop are
+  named as hints. Measured on an RTX 5080: no measurable extra CPU (the whole Tachyon
+  stays around 1% of one core), one extra thread.
+- **PCIe link history.** The link against the best the GPU and slot can do. Dropping to
+  Gen1/Gen2 at idle is normal and only counted; a narrower link (x8 in an x16 slot) or a
+  lower generation under load is logged as *degraded*, with the recovery. In the status,
+  the bottleneck evidence and the `get_pcie_link` tool.
+- **VRAM per process over time.** Every 5 s, from the same per-process counters Task
+  Manager uses (NVML has no per-process VRAM under Windows' WDDM), logged when it changes.
+  `get_process_vram` answers "who held VRAM between 18:00 and 18:30?" with peak, average
+  and a timeline per process.
+- **Render job markers.** A render script calls `tachyon mark start --job "shot 12"`
+  and `tachyon mark end --job "shot 12"`; Tachyon reports the job: duration, average and
+  peak GPU load, peak VRAM, average and peak power, energy (and cost), time clock-limited
+  by power or heat, the PCIe link and the processes holding the most VRAM. In the status
+  and the `get_job_reports` tool.
+
 New in 1.1:
 
 - **Pre-render check: "will this job fit?".** When a render job starts, Tachyon looks
@@ -84,7 +107,7 @@ polling, no cloud, no AI model):
   limit. The next run of the same job is compared with it ("14% slower than last time; GPU
   spent 6 min power-throttled"). Set `price_per_kwh` to see what each job cost.
 - **For AI agents: `tachyon.exe mcp`.** A local [MCP](https://modelcontextprotocol.io)
-  server with nine read-only tools, so an assistant like Claude Desktop or Cursor can ask
+  server with twelve read-only tools (nine before 1.2), so an assistant like Claude Desktop or Cursor can ask
   what the GPU is doing and why. Off until you turn it on in Settings (or set
   `agent_api = true`); it runs on pipes, not the network.
 - **Settings page.** Right-click the island, Hex or the panel and pick *Settings…*, or
@@ -236,6 +259,10 @@ glass = "auto"              # "tint" (works everywhere), "blur" (experimental) o
 poll_ms = 1000              # 250-2000
 gpu_index = 0               # which GPU, when there is more than one (Settings > General)
 pcie = true                 # PCIe RX/TX (about 20 ms of NVML wait per tick)
+fast_sampling = true        # 1.2: clocks, power, limits, PCIe link every fast_ms on a thread
+fast_ms = 100               # 50-1000
+fast_minutes = 15           # 1-60, the fast ring's length (about 352 KB at 15 min / 100 ms)
+proc_vram_secs = 5          # 1.2: VRAM per process every N s; 0 = off
 process_refresh_secs = 4
 process_cmdline = false     # true = also show command lines (off for privacy)
 process_hide = ["dwm.exe", "explorer.exe", "…"]   # hidden unless "show all"
@@ -287,6 +314,9 @@ writes only these:
 | `tachyon.toml` next to the exe (or in `%LOCALAPPDATA%\Tachyon`) | your settings, with `.bak` and any `.corrupt-…` copies beside it |
 | `%LOCALAPPDATA%\Tachyon\blackbox\` | flight recorder: two fixed-size files of readings (about 460 KB) |
 | `%LOCALAPPDATA%\Tachyon\history\jobs.jsonl` | finished jobs (rotated at 2 MB, one older file kept) |
+| `%LOCALAPPDATA%\Tachyon\blackbox\fast_a.bin`, `fast_b.bin` | 1.2: 100 ms readings, two fixed-size files (about 352 KB each at the defaults) |
+| `%LOCALAPPDATA%\Tachyon\history\pcie_link.jsonl`, `proc_vram.jsonl`, `marked_jobs.jsonl` | 1.2: PCIe link changes (1 MB), VRAM per process name (4 MB), marked job reports (4 MB); one older file kept each |
+| `%LOCALAPPDATA%\Tachyon\markers\markers.jsonl` | 1.2: written only by `tachyon mark`, one line per marker |
 | `%LOCALAPPDATA%\Tachyon\exports\` | only when you choose *Export flight recorder* |
 | `%LOCALAPPDATA%\Tachyon\logs\` | a short text file if Tachyon itself crashes: version, time, where in its code it stopped and the error message; no readings |
 | your Startup folder | `Tachyon.lnk`, only while *Start with Windows* is on |
@@ -302,6 +332,23 @@ from `shell:startup`), quit it, then delete `tachyon.exe`, its `tachyon.toml`
 and the `%LOCALAPPDATA%\Tachyon` folder. Nothing else is left behind.
 
 Security model and how to report a problem: [SECURITY.md](SECURITY.md).
+
+### Render job markers (1.2)
+
+From a render script (batch, PowerShell, Python):
+
+```bat
+tachyon.exe mark start --job "shot 12"
+rem ... render ...
+tachyon.exe mark end --job "shot 12"
+```
+
+Each call appends one line to `%LOCALAPPDATA%\Tachyon\markers\markers.jsonl` and exits
+with 0 (written), 1 (could not write) or 2 (wrong arguments). Tachyon must be running to
+measure the job; a job started before it is picked up from the moment it starts. In
+PowerShell, `Start-Process tachyon.exe -ArgumentList 'mark start --job "shot 12"' -Wait`
+waits for it (a plain call returns at once, as with any windowed program). The report is
+in the status (`marked_jobs`) and the `get_job_reports` tool.
 
 ### AI agents (MCP)
 
@@ -322,6 +369,7 @@ set `agent_api = true` and restart Tachyon. The entry looks like this:
 The client starts `tachyon.exe mcp` and talks to it over stdin and stdout.
 Tools: `get_status`, `get_bottleneck`, `get_vram_forecast`, `get_processes`,
 `get_blackbox`, `get_history`, `diagnose_crash` (1.1), `preflight` (1.1),
+`get_pcie_link` (1.2), `get_process_vram` (1.2), `get_job_reports` (1.2),
 `compare_last_run`; all are read-only. With
 Tachyon running, they read the status it publishes every two seconds; without
 it, `tachyon mcp` takes its own short reading.

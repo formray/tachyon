@@ -104,6 +104,20 @@ pub struct Agg {
     pub pcie_mbs: Option<f32>,
     pub pcie_rx: Option<f32>,
     pub pcie_tx: Option<f32>,
+    /// The PCIe link in the latest sample: (gen, width, best gen, best width).
+    pub link: Option<(Option<u8>, Option<u8>, Option<u8>, Option<u8>)>,
+}
+
+impl Agg {
+    /// The link is narrower than the slot allows, or below its generation while the GPU is busy
+    /// (idle downshifts are normal power saving and not mentioned).
+    pub fn link_short(&self) -> Option<String> {
+        let (g, w, gm, wm) = self.link?;
+        let narrow = matches!((w, wm), (Some(w), Some(m)) if w < m);
+        let slow = matches!((g, gm), (Some(g), Some(m)) if g < m) && self.util.is_some_and(|u| u >= crate::pcie::BUSY_UTIL as f32);
+        let t = |a: Option<u8>, b: Option<u8>| crate::pcie::link_text(a.map(u32::from), b.map(u32::from));
+        (narrow || slow).then(|| format!("{} instead of the {} this GPU and slot can do", t(g, w), t(gm, wm)))
+    }
 }
 
 fn mean(it: impl Iterator<Item = Option<f32>>) -> Option<f32> {
@@ -144,6 +158,9 @@ pub fn aggregate(w: &[Sample]) -> Agg {
         })),
         pcie_rx: mean(w.iter().map(|s| s.pcie_rx)),
         pcie_tx: mean(w.iter().map(|s| s.pcie_tx)),
+        link: last
+            .filter(|s| s.pcie_gen.is_some() || s.pcie_width.is_some())
+            .map(|s| (s.pcie_gen, s.pcie_width, s.pcie_gen_max, s.pcie_width_max)),
     }
 }
 
@@ -179,6 +196,11 @@ pub fn evidence(a: &Agg) -> Vec<String> {
             l += &format!(" ({:.0}% of the link)", f * 100.0);
         }
         e.push(l);
+    }
+    if let Some(short) = a.link_short() {
+        e.push(format!("PCIe link {short}"));
+    } else if let Some((g, w, _, _)) = a.link {
+        e.push(format!("PCIe link {}", crate::pcie::link_text(g.map(u32::from), w.map(u32::from))));
     }
     e
 }
@@ -275,11 +297,15 @@ pub fn assess(w: &[Sample]) -> Option<Verdict> {
     // 5. PCIe link close to its limit while the GPU waits
     if let (Some(f), Some(mbs)) = (a.pcie_frac, a.pcie_mbs) {
         if f >= 0.7 && util < 75.0 {
+            let short = a
+                .link_short()
+                .map(|s| format!(" The link itself runs at {s}: check the slot, riser or BIOS PCIe setting."))
+                .unwrap_or_default();
             return Some(v(
                 Kind::Pcie,
-                0.45 + (f - 0.7) + (75.0 - util) / 150.0,
+                0.45 + (f - 0.7) + (75.0 - util) / 150.0 + if short.is_empty() { 0.0 } else { 0.1 },
                 format!(
-                    "Data transfers over PCIe are the bottleneck ({:.1} GB/s, near this link's limit) while the GPU waits at {}.",
+                    "Data transfers over PCIe are the bottleneck ({:.1} GB/s, near this link's limit) while the GPU waits at {}.{short}",
                     mbs / 1024.0,
                     pc(util)
                 ),
@@ -543,6 +569,39 @@ pub mod tests {
             })),
             Kind::Mixed
         );
+    }
+
+    #[test]
+    fn pcie_link_below_its_best_is_evidence_only_under_load() {
+        let link = |s: &mut Sample, g: u8, w: u8| {
+            s.pcie_gen = Some(g);
+            s.pcie_width = Some(w);
+            s.pcie_gen_max = Some(5);
+            s.pcie_width_max = Some(16);
+        };
+        // idle at Gen1: normal power saving, just the link
+        let v = assess(&trace(10, |_, s| {
+            s.util = Some(2);
+            link(s, 1, 16)
+        }))
+        .unwrap();
+        assert!(v.evidence.iter().any(|e| e == "PCIe link Gen1 x16"), "{:?}", v.evidence);
+        // busy at Gen3: degraded
+        let v = assess(&trace(10, |_, s| {
+            s.util = Some(97);
+            link(s, 3, 16)
+        }))
+        .unwrap();
+        assert!(v.evidence.iter().any(|e| e == "PCIe link Gen3 x16 instead of the Gen5 x16 this GPU and slot can do"), "{:?}", v.evidence);
+        // narrower than the slot, at any load, and named in a PCIe verdict
+        let v = assess(&trace(10, |_, s| {
+            s.util = Some(40);
+            s.pcie_rx = Some(26000.0);
+            link(s, 5, 8)
+        }))
+        .unwrap();
+        assert_eq!(v.kind, Kind::Pcie);
+        assert!(v.sentence.contains("runs at Gen5 x8 instead of the Gen5 x16"), "{}", v.sentence);
     }
 
     #[test]

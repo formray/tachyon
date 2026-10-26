@@ -13,6 +13,38 @@ fn mcp_requested() -> bool {
     std::env::args().nth(1).is_some_and(|a| a.eq_ignore_ascii_case("mcp"))
 }
 
+/// `tachyon mark start|end --job NAME`: append a render job marker for the running Tachyon to read,
+/// print one line and exit (0 written, 1 could not write, 2 wrong arguments).
+fn mark_requested() -> Option<Vec<String>> {
+    let a: Vec<String> = std::env::args().skip(1).collect();
+    a.first().is_some_and(|x| x.eq_ignore_ascii_case("mark")).then(|| a[1..].to_vec())
+}
+
+fn run_mark(args: Vec<String>) -> ! {
+    let (code, line) = tachyon::markers::cli(&args, tachyon::config::data_dir(), tachyon::telemetry::now_ms());
+    #[cfg(windows)]
+    attach_console();
+    if code == 0 {
+        println!("{line}");
+    } else {
+        eprintln!("tachyon mark: {line}");
+    }
+    std::process::exit(code)
+}
+
+/// The release build has no console of its own: print into the console it was started from
+/// (when its output is not redirected to a file or pipe already).
+#[cfg(windows)]
+fn attach_console() {
+    use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole, GetStdHandle, STD_OUTPUT_HANDLE};
+    unsafe {
+        let h = GetStdHandle(STD_OUTPUT_HANDLE);
+        if h.is_null() || h == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+            AttachConsole(ATTACH_PARENT_PROCESS);
+        }
+    }
+}
+
 fn run_mcp() {
     let path = tachyon::config::config_path();
     // read the settings without creating a file
@@ -33,6 +65,9 @@ fn safe_dll_search() {
 #[cfg(windows)]
 fn main() {
     safe_dll_search();
+    if let Some(a) = mark_requested() {
+        run_mark(a);
+    }
     if mcp_requested() {
         tachyon::crashlog::install("mcp", |_| {});
         return run_mcp();
@@ -45,6 +80,9 @@ fn main() {
 #[cfg(not(windows))]
 fn main() {
     use tachyon::{config, nvml, scan};
+    if let Some(a) = mark_requested() {
+        run_mark(a);
+    }
     if mcp_requested() {
         return run_mcp();
     }

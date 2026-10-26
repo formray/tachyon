@@ -416,6 +416,11 @@ impl Recorder {
         self.slots
     }
 
+    /// "a" or "b": the ring this session writes (the fast ring uses the same letter).
+    pub fn which(&self) -> &str {
+        &self.session.file
+    }
+
     /// Queue a sample; pending samples are written every `WRITE_EVERY_MS`.
     pub fn push(&mut self, s: &Sample, now_ms: i64) {
         self.seq = self.seq.wrapping_add(1);

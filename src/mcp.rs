@@ -52,6 +52,40 @@ pub trait Source {
     fn boot_ms(&mut self) -> Option<i64> {
         crate::sysinfo::boot_time_ms()
     }
+    /// Tachyon's data folder (history, markers, the fast rings), if any.
+    fn data_dir(&self) -> Option<PathBuf> {
+        None
+    }
+    /// The 100 ms rings ("current", "previous"), oldest first.
+    fn fast_sessions(&mut self) -> Vec<(String, Vec<crate::fast::FastSample>)> {
+        self.data_dir().map(|d| crate::fast::read_sessions(&d.join("blackbox"))).unwrap_or_default()
+    }
+    /// A per-process VRAM reading now (when Tachyon is not running): (name, pid, MB) and where from.
+    fn proc_vram_now(&mut self) -> Option<(Vec<(String, u32, f32)>, &'static str)> {
+        None
+    }
+}
+
+/// The 100 ms readings of the last 30 s before a stop: the newest fast reading within 10 min
+/// before (or 2 min after, the fast ring reaches the disk sooner than the 1 s recorder) `stop_ms`.
+fn fast_before(src: &mut dyn Source, stop_ms: i64) -> Option<Value> {
+    let mut all: Vec<crate::fast::FastSample> = src.fast_sessions().into_iter().flat_map(|(_, v)| v).collect();
+    all.sort_by_key(|s| s.t_ms);
+    let last = all.iter().map(|s| s.t_ms).filter(|t| *t <= stop_ms + 120_000 && *t >= stop_ms - 600_000).max()?;
+    let mut v = crate::fast::last_seconds(&all, last, 30)?;
+    v["last_reading_at"] = json!(local_text(last, "%Y-%m-%d %H:%M:%S%.3f"));
+    Some(v)
+}
+
+/// Adds the last seconds to a diagnosis (and their hints).
+fn add_last_seconds(v: &mut Value, src: &mut dyn Source, stop_ms: Option<i64>) {
+    let Some(f) = stop_ms.and_then(|t| fast_before(src, t)) else { return };
+    let hints = crate::fast::crash_hints(&f);
+    if !hints.is_empty() && v["diagnosis"].is_object() {
+        let h = v["diagnosis"]["hints"].as_array().cloned().unwrap_or_default();
+        v["diagnosis"]["hints"] = json!(h.into_iter().chain(hints.into_iter().map(Value::from)).collect::<Vec<_>>());
+    }
+    v["last_seconds"] = f;
 }
 
 /// Every recorded sample of both sessions, oldest first.
@@ -600,7 +634,7 @@ fn diagnose_from_event_log(args: &Value, src: &mut dyn Source, now: i64) -> Resu
             (end - window[0].t_ms + 59_999) / 60_000
         )
     };
-    Ok(json!({
+    let mut out = json!({
         "source": if window.is_empty() { "event_log" } else { "event_log+flight_recorder" },
         "restart_at": local_text(first, "%Y-%m-%d %H:%M"),
         "stopped": stopped,
@@ -615,7 +649,9 @@ fn diagnose_from_event_log(args: &Value, src: &mut dyn Source, now: i64) -> Resu
         "last_log_entry_note": log_note,
         "other_restarts": list(&stops.iter().filter(|s| s.first != first).cloned().collect::<Vec<_>>()),
         "note": note,
-    }))
+    });
+    add_last_seconds(&mut out, src, stop.earliest_ms());
+    Ok(out)
 }
 
 fn tool(name: &str, title: &str, description: &str, props: Value) -> Value {
@@ -686,6 +722,36 @@ pub fn tools() -> Value {
                 "project": { "type": "string", "description": "Optional project folder name." },
                 "resolution": { "type": "string", "description": "Optional resolution: 4K, 1440p, 1080p, 720p, 8K or WxH such as 3840x2160." },
                 "frames": { "type": "integer", "description": "Optional frame count, for the duration.", "minimum": 1 },
+            })
+        ),
+        tool(
+            "get_pcie_link",
+            "PCIe link",
+            "The GPU's PCIe link now (generation and width) against the best this GPU and slot can do, and the logged changes. Dropping to a lower generation when idle is normal power saving and is only counted; a link narrower than the slot (x8 instead of x16) or below its generation under load is flagged as degraded (riser cable, slot shared with an M.2 drive, seating, BIOS setting).",
+            json!({
+                "days": { "type": "integer", "description": "How many days of logged changes (1-60, default 7).", "minimum": 1, "maximum": 60 },
+                "n": { "type": "integer", "description": "At most this many changes, newest last (1-200, default 20).", "minimum": 1, "maximum": 200 },
+            })
+        ),
+        tool(
+            "get_process_vram",
+            "VRAM per process over time",
+            "Which processes held the most video memory over a time range: peak, time-weighted average and last value per process (several processes with the same name count together), when each was first and last seen, and a short timeline for the top ones. Also the reading now. Recorded every few seconds while Tachyon runs (on Windows from the same per-process counters Task Manager uses).",
+            json!({
+                "minutes": { "type": "number", "description": "Window length in minutes up to now or `until` (1-10080, default 60).", "minimum": 1, "maximum": 10080 },
+                "since": { "type": "string", "description": "Optional start: local date and time (2026-10-26 18:00), or Unix ms." },
+                "until": { "type": "string", "description": "Optional end: local date and time, or Unix ms (default now)." },
+                "name": { "type": "string", "description": "Optional part of a process name, e.g. python." },
+                "top": { "type": "integer", "description": "How many processes (1-50, default 10).", "minimum": 1, "maximum": 50 },
+            })
+        ),
+        tool(
+            "get_job_reports",
+            "Marked render jobs",
+            "Reports for render jobs marked with `tachyon mark start --job NAME` / `tachyon mark end --job NAME` (a render script runs them): duration, average and peak GPU load, peak VRAM, average and peak power, energy (and cost when a price is set), time clock-limited by power or heat, the PCIe link during the job and the processes holding the most VRAM. Also the jobs still open.",
+            json!({
+                "n": { "type": "integer", "description": "How many reports (1-100, default 10), newest last.", "minimum": 1, "maximum": 100 },
+                "name": { "type": "string", "description": "Optional part of the job name." },
             })
         ),
         tool(
@@ -861,9 +927,13 @@ fn call(name: &str, args: &Value, src: &mut dyn Source) -> Result<Value, String>
             } else if recomputed {
                 v["note"] = json!("Worked out now from an older report, without the GPU overclock reading from before the crash.");
             }
+            add_last_seconds(&mut v, src, Some(r.stopped_ms));
             Ok(v)
         }
         "preflight" => preflight(args, src),
+        "get_pcie_link" => pcie_link(args, src, now),
+        "get_process_vram" => process_vram(args, src, now),
+        "get_job_reports" => job_reports(args, src, now),
         "compare_last_run" => {
             let filter = args["name"].as_str().map(str::to_lowercase);
             let jobs = src.history(2000);
@@ -878,6 +948,126 @@ fn call(name: &str, args: &Value, src: &mut dyn Source) -> Result<Value, String>
         }
         _ => Err(format!("Unknown tool: {name}")),
     }
+}
+
+const NO_DIR: &str = "No Tachyon data folder (LOCALAPPDATA is not set), so nothing has been recorded.";
+
+/// The `get_pcie_link` tool.
+fn pcie_link(args: &Value, src: &mut dyn Source, now: i64) -> Result<Value, String> {
+    let days = args["days"].as_u64().unwrap_or(7).clamp(1, 60) as i64;
+    let n = args["n"].as_u64().unwrap_or(20).clamp(1, 200) as usize;
+    let s = src.status();
+    let mut v = json!({ "now": s["pcie_link"], "source": s["source"] });
+    let Some(dir) = src.data_dir() else {
+        v["note"] = json!(NO_DIR);
+        return Ok(v);
+    };
+    let from = now - days * 86_400_000;
+    let all: Vec<crate::pcie::LinkEvent> = crate::pcie::recent(&dir.join("history"), 5000).into_iter().filter(|e| e.t_ms >= from).collect();
+    let degraded = all.iter().filter(|e| e.state.degraded()).count();
+    let idle: u32 = all.iter().filter_map(|e| e.idle_changes).sum();
+    let skip = all.len().saturating_sub(n);
+    v["days"] = json!(days);
+    v["degraded_events"] = json!(degraded);
+    v["idle_changes_logged"] = json!(idle);
+    v["changes"] = json!(
+        all[skip..]
+            .iter()
+            .map(|e| json!({ "time": local_text(e.t_ms, "%Y-%m-%d %H:%M:%S"), "from": e.from, "to": e.to, "state": e.state, "gpu_pct": e.gpu_pct, "idle_changes": e.idle_changes, "sentence": e.sentence }))
+            .collect::<Vec<_>>()
+    );
+    v["summary"] = json!(match (degraded, &s["pcie_link"]["sentence"]) {
+        (0, Value::String(now_s)) => format!("{now_s} No degraded link in the last {days} day(s)."),
+        (0, _) => format!("No degraded link logged in the last {days} day(s)."),
+        (d, Value::String(now_s)) => format!("{now_s} The link was degraded {d} time(s) in the last {days} day(s): see `changes`."),
+        (d, _) => format!("The link was degraded {d} time(s) in the last {days} day(s): see `changes`."),
+    });
+    if s["source"] != "tachyon" {
+        v["note"] = json!("Tachyon is not running: the link now is a single reading, and changes are only logged while Tachyon runs.");
+    }
+    Ok(v)
+}
+
+/// The `get_process_vram` tool.
+fn process_vram(args: &Value, src: &mut dyn Source, now: i64) -> Result<Value, String> {
+    let minutes = args["minutes"].as_f64().map(|m| m.clamp(1.0, 10_080.0));
+    let since = parse_time(&args["since"], "since")?;
+    let until = parse_time(&args["until"], "until")?;
+    let ms = |m: f64| (m * 60_000.0) as i64;
+    let (from, to) = match (since, until) {
+        (Some(f), Some(t)) => (f, t),
+        (Some(f), None) => (f, minutes.map_or(now, |m| f + ms(m))),
+        (None, Some(t)) => (t - ms(minutes.unwrap_or(60.0)), t),
+        (None, None) => (now - ms(minutes.unwrap_or(60.0)), now),
+    };
+    if to < from {
+        return Err("`until` is before `since`.".into());
+    }
+    let top = args["top"].as_u64().unwrap_or(10).clamp(1, 50) as usize;
+    let name = args["name"].as_str().map(str::trim).filter(|n| !n.is_empty());
+    let s = src.status();
+    let mut v = json!({});
+    if s["process_vram"].is_object() {
+        v["now"] = s["process_vram"].clone();
+    } else if let Some((list, source)) = src.proc_vram_now() {
+        let list = crate::procvram::top(list);
+        v["now"] = json!({ "source": source, "top": list.iter().take(top).map(|(n, pid, mb)| json!({ "name": n, "pid": pid, "vram_mb": mb })).collect::<Vec<_>>() });
+    }
+    let Some(dir) = src.data_dir() else {
+        v["note"] = json!(NO_DIR);
+        return Ok(v);
+    };
+    let pts = crate::procvram::read_range(&dir.join("history"), from, to);
+    v["history"] = crate::procvram::summary(&pts, from, to, name, top);
+    if pts.is_empty() {
+        v["note"] = json!(
+            "Nothing recorded in this window: per-process VRAM is logged every few seconds while Tachyon runs (history = true, proc_vram_secs > 0)."
+        );
+    }
+    Ok(v)
+}
+
+/// The `get_job_reports` tool.
+fn job_reports(args: &Value, src: &mut dyn Source, now: i64) -> Result<Value, String> {
+    let n = args["n"].as_u64().unwrap_or(10).clamp(1, 100) as usize;
+    let filter = args["name"].as_str().map(str::to_lowercase).filter(|f| !f.trim().is_empty());
+    let Some(dir) = src.data_dir() else { return Ok(json!({ "reports": [], "note": NO_DIR })) };
+    let all = crate::markers::reports(&dir.join("history"), 5000);
+    let mut r: Vec<&crate::markers::JobReport> =
+        all.iter().filter(|r| filter.as_ref().is_none_or(|f| r.job.to_lowercase().contains(f))).collect();
+    let skip = r.len().saturating_sub(n);
+    r.drain(..skip);
+    let s = src.status();
+    let running = s["source"] == "tachyon";
+    let open = if running {
+        s["marked_jobs"]["open"].clone()
+    } else {
+        // what the marker file says is open (nothing measures it while Tachyon is closed)
+        let mut open: Vec<(String, i64)> = vec![];
+        for m in crate::markers::read_all(&dir) {
+            open.retain(|(j, _)| *j != m.job);
+            if m.op == "start" && now - m.t < crate::markers::MAX_JOB_MS {
+                open.push((m.job, m.t));
+            }
+        }
+        json!(
+            open.iter()
+                .map(|(j, t)| json!({ "job": j, "started": local_text(*t, "%Y-%m-%d %H:%M:%S"), "running_s": (now - t) / 1000 }))
+                .collect::<Vec<_>>()
+        )
+    };
+    let mut v = json!({ "reports": r, "count": r.len(), "open": open, "source": s["source"] });
+    if !running {
+        v["note"] = json!("Tachyon is not running: markers are written but only a running Tachyon measures the jobs.");
+    } else if r.is_empty() {
+        v["note"] = json!(
+            "No marked job has finished yet. A render script marks a job with `tachyon mark start --job NAME` and `tachyon mark end --job NAME`."
+        );
+    }
+    if let Some(notes) = s["marked_jobs"]["notes"].as_array().filter(|a| !a.is_empty()) {
+        v["marker_notes"] = json!(notes);
+    }
+    Ok(v)
 }
 
 /// The `preflight` tool: the running job's published check, or a check for the job asked about.
@@ -954,7 +1144,7 @@ pub fn handle(msg: &Value, src: &mut dyn Source) -> Option<Value> {
                     "protocolVersion": v,
                     "capabilities": { "tools": { "listChanged": false } },
                     "serverInfo": { "name": "tachyon", "title": "Tachyon GPU monitor", "version": env!("CARGO_PKG_VERSION") },
-                    "instructions": "Read-only view of this PC's NVIDIA GPU from Tachyon. Use get_bottleneck to explain slowness, get_vram_forecast before loading large models, get_blackbox and diagnose_crash after a crash, preflight before starting a render (will it fit?), get_history and compare_last_run for render jobs.",
+                    "instructions": "Read-only view of this PC's NVIDIA GPU from Tachyon. Use get_bottleneck to explain slowness, get_vram_forecast before loading large models, get_blackbox and diagnose_crash after a crash, preflight before starting a render (will it fit?), get_history and compare_last_run for render jobs, get_job_reports for jobs a script marked with `tachyon mark`, get_process_vram for who held VRAM when, and get_pcie_link for the PCIe link.",
 
                 }),
             )
@@ -1032,6 +1222,11 @@ impl Live {
             crate::insight::KEEP_PROCS,
         );
         snap.insights.bottleneck = st.explainer.push(&s).cloned();
+        if let Some(g) = g.as_ref() {
+            let mut lt = crate::pcie::LinkTracker::default();
+            lt.push(s.t_ms, g.pcie_gen, g.pcie_width, g.pcie_gen_max, g.pcie_width_max, s.util);
+            snap.insights.pcie = Some(lt.status).filter(|l| l.state.is_some());
+        }
         snap.insights.latest = Some(s);
         snap.insights.data_dir = self.dir.clone();
         snap.insights.report = self.dir.as_ref().and_then(|d| report::load(&d.join("blackbox"))).map(std::sync::Arc::new);
@@ -1092,6 +1287,33 @@ impl Source for Live {
 
     fn history(&mut self, n: usize) -> Vec<JobRecord> {
         self.dir.as_ref().map(|d| history::recent(&d.join("history"), n)).unwrap_or_default()
+    }
+
+    fn data_dir(&self) -> Option<PathBuf> {
+        self.dir.clone()
+    }
+
+    fn proc_vram_now(&mut self) -> Option<(Vec<(String, u32, f32)>, &'static str)> {
+        let snap = self.own_reading();
+        let nv: Vec<(String, u32, f32)> =
+            snap.procs.iter().flatten().filter_map(|p| p.info.vram_mb.map(|m| (p.info.name.clone(), p.info.pid, m as f32))).collect();
+        if !nv.is_empty() {
+            return Some((nv, "nvml"));
+        }
+        #[cfg(windows)]
+        {
+            let used = snap.sample.as_ref().and_then(|g| g.vram_used_mb);
+            let list = crate::procvram::pdh::GpuMem::open()?.read(used)?;
+            let table = crate::procinfo::win::snapshot();
+            Some((
+                list.into_iter()
+                    .map(|(pid, mb)| (table.get(&pid).map(|(_, n)| n.clone()).unwrap_or_else(|| format!("pid {pid}")), pid, mb))
+                    .collect(),
+                "windows counters",
+            ))
+        }
+        #[cfg(not(windows))]
+        None
     }
 
     fn context(&mut self) -> crate::diagnose::Context {
@@ -1206,6 +1428,8 @@ mod tests {
         sessions: Vec<(String, Vec<Sample>)>,
         log: Vec<crate::events::SysEvent>,
         boot: Option<i64>,
+        dir: Option<PathBuf>,
+        fast: Vec<(String, Vec<crate::fast::FastSample>)>,
     }
 
     impl Source for Fake {
@@ -1243,6 +1467,12 @@ mod tests {
         }
         fn boot_ms(&mut self) -> Option<i64> {
             self.boot
+        }
+        fn data_dir(&self) -> Option<PathBuf> {
+            self.dir.clone()
+        }
+        fn fast_sessions(&mut self) -> Vec<(String, Vec<crate::fast::FastSample>)> {
+            self.fast.clone()
         }
     }
 
@@ -1527,6 +1757,9 @@ mod tests {
                 "get_history",
                 "diagnose_crash",
                 "preflight",
+                "get_pcie_link",
+                "get_process_vram",
+                "get_job_reports",
                 "compare_last_run"
             ]
         );
@@ -1709,12 +1942,127 @@ mod tests {
         let v = call(&mut f)["structuredContent"].clone();
         assert_eq!(v["diagnosis"]["causes"][0]["suspect"], "ram", "{v:#}");
         assert!(v["note"].is_null());
+        assert!(v["last_seconds"].is_null(), "no fast readings");
+        // 1.2: the 100 ms readings of the last seconds, with a +180 W step 300 ms before the stop
+        let fast: Vec<crate::fast::FastSample> = (0..400)
+            .map(|i| crate::fast::FastSample {
+                t_ms: stop - 39_900 + i * 100,
+                power_w: Some(if i >= 396 { 355.0 } else { 175.0 }),
+                power_limit_w: Some(360.0),
+                clk_sm: Some(2800),
+                temp: Some(66),
+                util: Some(97),
+                throttle: Some(if i >= 397 { 0x80 } else { 0 }),
+                pcie_gen: Some(5),
+                pcie_width: Some(16),
+                ..Default::default()
+            })
+            .collect();
+        f.fast = vec![("previous".into(), fast)];
+        let v = call(&mut f)["structuredContent"].clone();
+        assert_eq!(v["last_seconds"]["readings"], 300, "{:#}", v["last_seconds"]);
+        assert_eq!(v["last_seconds"]["biggest_power_jump"]["w"], 180.0);
+        let hints = v["diagnosis"]["hints"].as_array().unwrap();
+        assert!(hints.iter().any(|h| h.as_str().unwrap().contains("power spike of +180 W")), "{hints:?}");
+        assert!(hints.iter().any(|h| h.as_str().unwrap().contains("power brake")), "{hints:?}");
         // a 1.0 report without a diagnosis: worked out from the report
         r.diagnosis = None;
         f.report = Some(r);
         let v = call(&mut f)["structuredContent"].clone();
         assert_eq!(v["diagnosis"]["causes"][0]["suspect"], "ram");
         assert!(v["note"].as_str().unwrap().contains("older report"));
+    }
+
+    #[test]
+    fn pcie_process_vram_and_job_reports_read_the_history() {
+        let d = std::env::temp_dir().join(format!("tachyon_mcp12_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let h = d.join("history");
+        let now = crate::telemetry::now_ms();
+        let call = |f: &mut Fake, name: &str, a: Value| {
+            rpc(f, 11, "tools/call", json!({ "name": name, "arguments": a }))["result"]["structuredContent"].clone()
+        };
+        let mut f = Fake { on: true, ..Default::default() };
+        assert!(call(&mut f, "get_job_reports", json!({}))["note"].as_str().unwrap().starts_with("No Tachyon data folder"));
+        f.dir = Some(d.clone());
+        // PCIe: an idle downshift and a degraded link under load
+        let mut lt = crate::pcie::LinkTracker::default();
+        let mut ev = vec![];
+        ev.extend(lt.push(now - 60_000, Some(5), Some(16), Some(5), Some(16), Some(90)));
+        ev.extend(lt.push(now - 50_000, Some(1), Some(16), Some(5), Some(16), Some(1)));
+        for i in 0..10 {
+            ev.extend(lt.push(now - 20_000 + i * 1000, Some(3), Some(16), Some(5), Some(16), Some(98)));
+        }
+        crate::pcie::append(&h, &ev).unwrap();
+        f.status = Some(
+            json!({ "source": "tachyon", "pcie_link": lt.status, "marked_jobs": { "open": [{ "job": "shot 13", "started": "x", "running_s": 5 }] } }),
+        );
+        let v = call(&mut f, "get_pcie_link", json!({}));
+        assert_eq!(v["degraded_events"], 1, "{v:#}");
+        assert_eq!(v["now"]["state"], "degraded_gen");
+        assert!(v["summary"].as_str().unwrap().contains("degraded 1 time(s)"), "{v:#}");
+        assert!(v["changes"].as_array().unwrap().iter().any(|c| c["state"] == "idle_saving"));
+        // per-process VRAM
+        let mut log = crate::procvram::VramLog::default();
+        for (i, mb) in [(0, 2000.0), (1, 9000.0), (2, 9000.0), (3, 500.0)] {
+            if let Some(p) = log.push(now - 600_000 + i * 120_000, vec![("python.exe".into(), 10, mb), ("dwm.exe".into(), 4, 300.0)]) {
+                crate::procvram::append(&h, &p).unwrap();
+            }
+        }
+        let v = call(&mut f, "get_process_vram", json!({ "minutes": 30 }));
+        assert_eq!(v["history"]["top"][0]["name"], "python.exe", "{v:#}");
+        assert_eq!(v["history"]["top"][0]["peak_mb"], 9000.0);
+        let v = call(&mut f, "get_process_vram", json!({ "minutes": 30, "name": "dwm" }));
+        assert_eq!(v["history"]["processes"], 1);
+        assert!(call(&mut f, "get_process_vram", json!({ "since": "2026-10-26 18:00", "until": "2026-10-26 17:00" })).is_null());
+        // marked jobs
+        let r = crate::markers::JobReport {
+            job: "shot 12".into(),
+            start: "s".into(),
+            end: "e".into(),
+            start_ms: now - 120_000,
+            end_ms: now - 60_000,
+            duration_s: 60.0,
+            ended_by: "end marker".into(),
+            covered_s: 60.0,
+            gpu_util_avg: Some(97.5),
+            gpu_util_peak: Some(99),
+            mem_ctrl_avg: None,
+            vram_start_mb: None,
+            vram_peak_mb: Some(12000.0),
+            vram_end_mb: None,
+            vram_total_mb: None,
+            power_avg_w: Some(340.0),
+            power_peak_w: Some(372.0),
+            power_limit_w: Some(360.0),
+            energy_wh: Some(5.8),
+            cost: None,
+            temp_avg_c: None,
+            temp_peak_c: Some(70),
+            clk_sm_min_mhz: None,
+            clk_sm_max_mhz: None,
+            power_limited_s: 12.0,
+            thermal_limited_s: 0.0,
+            at_power_limit_s: 3.0,
+            clock_limit_reasons: vec![],
+            pcie: json!({ "at_start": "Gen5 x16" }),
+            top_vram_processes: vec![("python.exe".into(), 8900.0)],
+            bottleneck_mostly: Some("GPU-bound".into()),
+            sentence: "\"shot 12\" ran 1 min.".into(),
+        };
+        crate::markers::save_report(&h, &r).unwrap();
+        let v = call(&mut f, "get_job_reports", json!({ "name": "SHOT" }));
+        assert_eq!(v["count"], 1, "{v:#}");
+        assert_eq!(v["reports"][0]["energy_wh"], 5.8);
+        assert_eq!(v["open"][0]["job"], "shot 13");
+        assert_eq!(call(&mut f, "get_job_reports", json!({ "name": "other" }))["count"], 0);
+        // Tachyon closed: open jobs come from the marker file
+        crate::markers::write_mark(&d, "start", "overnight", now - 10_000).unwrap();
+        f.status = Some(json!({ "source": "standalone" }));
+        let v = call(&mut f, "get_job_reports", json!({}));
+        assert_eq!(v["open"][0]["job"], "overnight");
+        assert!(v["note"].as_str().unwrap().contains("not running"));
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     fn serve_bytes(input: &[u8]) -> Vec<Value> {

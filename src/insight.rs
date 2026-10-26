@@ -46,6 +46,32 @@ pub struct Insights {
     pub preflight: Option<Preflight>,
     /// The check says out of memory with enough confidence and Hex has not said so for this job.
     pub preflight_new: bool,
+    /// The PCIe link now, against the best the GPU and slot can do (1.2).
+    pub pcie: Option<crate::pcie::LinkStatus>,
+    /// The 100 ms sampler (1.2): None when it is off.
+    pub fast: Option<FastStatus>,
+    /// Render jobs marked with `tachyon mark` (1.2): open now, the last finished, a counter.
+    pub marked_open: Vec<crate::markers::OpenJob>,
+    pub marked_last: Option<crate::markers::JobReport>,
+    pub marked_done: u64,
+    pub marker_notes: Vec<String>,
+    /// The latest per-process VRAM reading (1.2): (name, pid, MB), largest first.
+    pub proc_vram: Vec<(String, u32, f32)>,
+    /// Where those numbers come from ("windows counters" or "nvml").
+    pub proc_vram_source: Option<&'static str>,
+}
+
+/// The 100 ms sampler's state, for the status.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+pub struct FastStatus {
+    pub period_ms: u64,
+    pub readings: u64,
+    pub late: u64,
+    pub minutes_kept: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest: Option<crate::fast::FastSample>,
 }
 
 pub struct Engine {
@@ -68,8 +94,23 @@ pub struct Engine {
     pf_key: Option<String>,
     pf_since: u64,
     pf_told: Option<String>,
+    /// 1.2: the 100 ms sampler thread, the PCIe link, render job markers, per-process VRAM.
+    fast: Option<crate::fast::FastSampler>,
+    fast_minutes: u32,
+    link: crate::pcie::LinkTracker,
+    gpu: Option<u32>,
+    marks: Option<crate::markers::MarkerTracker>,
+    vlog: crate::procvram::VramLog,
     // Held open while running so a second Tachyon does not share the recorder files.
     _lock: Option<std::fs::File>,
+}
+
+/// The fast sampler's own NVML session (opened on its thread).
+pub fn fast_open() -> Option<Box<dyn crate::fast::FastSource>> {
+    crate::nvml::Nvml::open().ok().map(|mut n| {
+        n.pcie = false;
+        Box::new(n) as Box<dyn crate::fast::FastSource>
+    })
 }
 
 #[cfg(windows)]
@@ -102,6 +143,12 @@ impl Engine {
             pf_key: None,
             pf_since: 0,
             pf_told: None,
+            fast: None,
+            fast_minutes: cfg.fast_minutes,
+            link: Default::default(),
+            gpu: None,
+            marks: None,
+            vlog: Default::default(),
             _lock: None,
         };
         e.forecaster.set_horizon_minutes(cfg.vram_forecast_minutes);
@@ -133,6 +180,15 @@ impl Engine {
                 Err(err) => out.note = Some(format!("The flight recorder is off: {err}.")),
             }
         }
+        if cfg.fast_sampling
+            && let Some(r) = e.recorder.as_ref()
+        {
+            match crate::fast::FastSampler::start(&bb, r.which(), cfg.fast_interval_ms(), cfg.fast_minutes, cfg.gpu_index, fast_open) {
+                Ok(f) => e.fast = Some(f),
+                Err(err) => out.note = Some(format!("Fast sampling is off: {err}.")),
+            }
+        }
+        e.marks = Some(crate::markers::MarkerTracker::open(&dir, now_ms));
         out.report = crate::report::load(&bb).map(std::sync::Arc::new);
         out.report_new = out.report.as_ref().is_some_and(|r| !r.announced);
         e
@@ -159,6 +215,34 @@ impl Engine {
             let _ = save_oc(&bb, &oc);
         }
         self.oc_now = Some(oc);
+    }
+
+    /// The GPU the sampler shows (the fast sampler and the link history follow it).
+    pub fn set_gpu(&mut self, idx: u32) {
+        if self.gpu != Some(idx) {
+            self.gpu = Some(idx);
+            self.link = Default::default();
+            if let Some(f) = self.fast.as_ref() {
+                f.set_gpu(idx);
+            }
+        }
+    }
+
+    /// A per-process VRAM reading, (name, pid, MB): logged when it changed, kept for the
+    /// marked jobs and the status.
+    pub fn set_proc_vram(&mut self, now_ms: i64, list: Vec<(String, u32, f32)>, source: &'static str, out: &mut Insights) {
+        if let Some(m) = self.marks.as_mut() {
+            m.procs(&list);
+        }
+        let top = crate::procvram::top(list.clone());
+        if let Some(p) = self.vlog.push(now_ms, list)
+            && self.history
+            && let Some(d) = self.history_dir()
+        {
+            let _ = crate::procvram::append(&d, &p);
+        }
+        out.proc_vram = top;
+        out.proc_vram_source = Some(source);
     }
 
     /// What the render logs say about the running job (project, resolution, frames).
@@ -235,6 +319,41 @@ impl Engine {
         let (cpu, mem) = self.sys.sample(2);
         let s = Sample::from_tick(now_ms, g, procs, cpu, mem, KEEP_PROCS);
         out.bottleneck = if g.is_some() { self.explainer.push(&s).cloned() } else { None };
+        let (fast, latest) = self.fast.as_ref().map(|f| f.take()).unwrap_or_default();
+        if let Some(f) = self.fast.as_ref() {
+            let sh = f.shared.lock().map(|x| (x.total, x.late, x.note.clone())).unwrap_or_default();
+            out.fast = Some(FastStatus {
+                period_ms: f.period_ms,
+                readings: sh.0,
+                late: sh.1,
+                minutes_kept: self.fast_minutes,
+                note: sh.2,
+                latest,
+            });
+        }
+        if let Some(g) = g {
+            let ev = self.link.push(now_ms, g.pcie_gen, g.pcie_width, g.pcie_gen_max, g.pcie_width_max, s.util);
+            if !ev.is_empty()
+                && self.history
+                && let Some(d) = self.history_dir()
+            {
+                let _ = crate::pcie::append(&d, &ev);
+            }
+            out.pcie = Some(self.link.status.clone()).filter(|l| l.state.is_some());
+        }
+        if let Some(m) = self.marks.as_mut() {
+            let kind = out.bottleneck.as_ref().map(|v| v.kind);
+            let done = m.tick(&s, &fast, out.pcie.as_ref(), kind, self.jobs.price.as_ref());
+            out.marked_open = m.open_jobs(now_ms);
+            out.marker_notes = m.notes.clone();
+            for r in done {
+                if let Some(d) = self.history_dir() {
+                    let _ = crate::markers::save_report(&d, &r);
+                }
+                out.marked_last = Some(r);
+                out.marked_done += 1;
+            }
+        }
         out.forecast = if g.is_some() { self.forecaster.push(&s, 2).clone() } else { Forecast::default() };
         if let Some(r) = self.recorder.as_mut() {
             r.push(&s, now_ms);
@@ -328,6 +447,10 @@ impl Engine {
 
     /// Clean exit: record a running job and mark the session clean.
     pub fn close(&mut self, now_ms: i64, out: &mut Insights) {
+        // the fast thread flushes its ring and stops first
+        if let Some(mut f) = self.fast.take() {
+            f.stop();
+        }
         if self.history
             && let Some(job) = self.jobs.end()
         {
