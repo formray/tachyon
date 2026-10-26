@@ -25,6 +25,8 @@ Hardening for public use: safer for everyone, easier for anyone. No new readings
 - CI runs `cargo deny` and `cargo audit`; all actions pinned by commit SHA with Dependabot updates; job and step timeouts (the 1.0.0 release run hung on apt); Rust build cache.
 - Releases carry a signed build-provenance attestation for `tachyon.exe` and the zip, next to `SHA256SUMS.txt`.
 - winget and Scoop manifests in `packaging/` (not submitted yet).
+- **Claude Desktop extension:** each release also carries `tachyon-<version>-windows-x64.mcpb` (in `SHA256SUMS.txt` and the attestation); it asks for your `tachyon.toml` so it follows the same *Agent API* switch.
+- MCP Registry entry (`packaging/mcp/server.json`, `io.github.formray/tachyon`) and a manual-only *Publish to MCP Registry* workflow; an agent skill in `packaging/skill/tachyon-gpu/`; README setup for Claude, Codex and Grok.
 
 ## v1.0.0
 

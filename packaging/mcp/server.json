@@ -1,0 +1,23 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.formray/tachyon",
+  "title": "Tachyon GPU monitor",
+  "description": "Read-only NVIDIA GPU monitor for Windows: bottlenecks, VRAM forecast, crash recorder, job history.",
+  "repository": {
+    "url": "https://github.com/formray/tachyon",
+    "source": "github"
+  },
+  "websiteUrl": "https://github.com/formray/tachyon",
+  "version": "1.0.1",
+  "packages": [
+    {
+      "registryType": "mcpb",
+      "identifier": "https://github.com/formray/tachyon/releases/download/v1.0.1/tachyon-1.0.1-windows-x64.mcpb",
+      "version": "1.0.1",
+      "fileSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

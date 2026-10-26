@@ -294,6 +294,36 @@ Tools: `get_status`, `get_bottleneck`, `get_vram_forecast`, `get_processes`,
 Tachyon running, they read the status it publishes every two seconds; without
 it, `tachyon mcp` takes its own short reading.
 
+#### With Claude, Codex and Grok
+
+First turn on *Agent API* in Tachyon (Settings → AI agents). Then, per client:
+
+- **Claude Desktop:** download `tachyon-<version>-windows-x64.mcpb` from the
+  release and double-click it (or Settings → Extensions → Advanced → Install
+  Extension). It asks for your *Tachyon settings file*: pick the `tachyon.toml`
+  of the Tachyon you run (next to its exe, or `%LOCALAPPDATA%\Tachyon\tachyon.toml`
+  for winget and Scoop installs), so the extension sees the same *Agent API*
+  switch. Or paste the *Copy MCP config* entry into `claude_desktop_config.json`.
+- **Claude Code:** `claude mcp add tachyon -- "C:\Tools\Tachyon\tachyon.exe" mcp`
+  (or just `tachyon mcp` when it is on PATH through winget or Scoop).
+- **Codex (CLI, IDE, ChatGPT desktop):** `codex mcp add tachyon -- tachyon mcp`, or in
+  `~/.codex/config.toml`:
+  ```toml
+  [mcp_servers.tachyon]
+  command = 'C:\Tools\Tachyon\tachyon.exe'
+  args = ["mcp"]
+  ```
+- **Grok Build and other MCP clients:** add a stdio server with the command
+  `tachyon.exe` and the argument `mcp`; most accept the *Copy MCP config* JSON
+  as it is. Grok Build also reads Claude Code plugins and skills.
+
+Agents answer better with the skill in
+[`packaging/skill/tachyon-gpu/SKILL.md`](packaging/skill/tachyon-gpu/SKILL.md): which tool
+for which question, how to read the answers and what to say when the agent API
+is off. Copy the `tachyon-gpu` folder into `~/.claude/skills/` (Claude Code),
+`~/.codex/skills/` (Codex) or your client's skills folder. The server runs on the
+PC it reads; a cloud-hosted agent cannot reach it.
+
 Run it with `TACHYON_DEBUG=1` from a console to see the glass mode, then,
 every 10 ticks, paint and poll times, frames drawn, working set, private
 bytes and CPU.

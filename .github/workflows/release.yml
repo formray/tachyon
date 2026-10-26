@@ -1,7 +1,8 @@
 name: Release
 
 # Push a tag like v1.0.1: builds tachyon.exe (MinGW, with icon and version info), zips it as
-# Tachyon_<tag>.zip with README.txt and the licences, records SHA256SUMS.txt and a signed
+# Tachyon_<tag>.zip with README.txt and the licences, packs the Claude Desktop extension
+# tachyon-<version>-windows-x64.mcpb, records SHA256SUMS.txt and a signed
 # build-provenance attestation (gh attestation verify), and attaches them to a GitHub release.
 # The release text is the tag's section of CHANGELOG.md.
 on:
@@ -49,7 +50,15 @@ jobs:
           cp target/x86_64-pc-windows-gnu/release/tachyon.exe out/Tachyon/
           cp packaging/README.txt LICENSE-MIT LICENSE-APACHE out/Tachyon/
           (cd out && zip -r -X "Tachyon_${GITHUB_REF_NAME}.zip" Tachyon)
-          (cd out && sha256sum tachyon.exe "Tachyon_${GITHUB_REF_NAME}.zip" > SHA256SUMS.txt && cat SHA256SUMS.txt)
+          # Claude Desktop extension: tachyon.exe mcp with its manifest (packaging/mcpb)
+          V="${GITHUB_REF_NAME#v}"
+          test "$(jq -r .version packaging/mcpb/manifest.json)" = "$V" || { echo "packaging/mcpb/manifest.json is not $V"; exit 1; }
+          mkdir -p out/mcpb/server
+          cp packaging/mcpb/manifest.json packaging/mcpb/icon.png packaging/mcpb/.mcpbignore LICENSE-MIT LICENSE-APACHE out/mcpb/
+          cp out/tachyon.exe out/mcpb/server/tachyon.exe
+          npx --yes @anthropic-ai/mcpb@2.1.2 validate out/mcpb/manifest.json
+          npx --yes @anthropic-ai/mcpb@2.1.2 pack out/mcpb "out/tachyon-$V-windows-x64.mcpb"
+          (cd out && sha256sum tachyon.exe "Tachyon_${GITHUB_REF_NAME}.zip" "tachyon-$V-windows-x64.mcpb" > SHA256SUMS.txt && cat SHA256SUMS.txt)
           awk -v t="## ${GITHUB_REF_NAME}" '$0==t{f=1;next} /^## /{f=0} f' CHANGELOG.md > out/notes.md
           test -s out/notes.md || echo "Tachyon ${GITHUB_REF_NAME}" > out/notes.md
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
@@ -57,6 +66,7 @@ jobs:
           subject-path: |
             out/tachyon.exe
             out/Tachyon_${{ github.ref_name }}.zip
+            out/tachyon-*-windows-x64.mcpb
       - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           name: Tachyon ${{ github.ref_name }}
@@ -64,4 +74,5 @@ jobs:
           files: |
             out/tachyon.exe
             out/Tachyon_${{ github.ref_name }}.zip
+            out/tachyon-*-windows-x64.mcpb
             out/SHA256SUMS.txt

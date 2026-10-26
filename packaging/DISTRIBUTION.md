@@ -9,6 +9,9 @@ person. Nothing here has been submitted.
 |---|---|---|
 | `winget/manifests/f/Formray/Tachyon/1.0.1/` | winget (`winget install Formray.Tachyon`): zip with a nested portable exe, command alias `tachyon` | run `update-hashes.sh 1.0.1` after the release, then `winget validate` and `winget install --manifest` on a Windows PC |
 | `scoop/tachyon.json` | Scoop: a bucket of our own, or a pull request to the `extras` bucket | `update-hashes.sh 1.0.1`; `checkver` and `autoupdate` read later releases and their `SHA256SUMS.txt` |
+| `mcpb/` | Claude Desktop extension, packed by `release.yml` into `tachyon-<v>-windows-x64.mcpb` | nothing: built, hashed and attested with each release |
+| `mcp/server.json` | official MCP Registry, `io.github.formray/tachyon` (`registryType: mcpb`) | run *Actions → Publish to MCP Registry* by hand with the tag, first with *dry run*; it fills version, URL and `fileSha256` from the release and logs in with GitHub OIDC (needs an Owner of the formray org to allow it). Never runs by itself |
+| `skill/tachyon-gpu/SKILL.md` | Agent Skill for Claude, Codex, Grok | ships in the repo; a plugin repo can reuse it |
 | `update-hashes.sh` | fills both hashes from the release's `SHA256SUMS.txt` | — |
 
 With winget or Scoop the exe's folder is replaced on every update, so Tachyon notices

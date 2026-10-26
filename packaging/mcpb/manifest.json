@@ -1,0 +1,56 @@
+{
+  "$schema": "https://raw.githubusercontent.com/modelcontextprotocol/mcpb/main/schemas/mcpb-manifest-v0.3.schema.json",
+  "manifest_version": "0.3",
+  "name": "tachyon",
+  "display_name": "Tachyon GPU monitor",
+  "version": "1.0.1",
+  "description": "Read-only view of this PC's NVIDIA GPU: load, VRAM forecast, bottleneck, crash flight recorder and render job history.",
+  "long_description": "Tachyon is a lightweight, read-only NVIDIA GPU monitor for Windows. This extension runs `tachyon.exe mcp`, a local stdio MCP server, so Claude can answer questions such as *why is my render slow?*, *will this model fit in VRAM?*, *what happened before the driver crashed?* and *was this render faster than last time?*\n\n- Seven tools, all read-only (`readOnlyHint: true`). Nothing can change clocks, fans, power limits, processes or files.\n- Local and offline: no network access, no telemetry.\n- Live data comes from the running Tachyon app with **Agent API** turned on in its Settings. Point this extension at that `tachyon.toml` below.\n\nRequires Windows 10/11 x64 and an NVIDIA GPU with its driver installed.",
+  "author": {
+    "name": "Formray",
+    "url": "https://github.com/formray"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/formray/tachyon.git"
+  },
+  "homepage": "https://github.com/formray/tachyon",
+  "documentation": "https://github.com/formray/tachyon#ai-agents-mcp",
+  "support": "https://github.com/formray/tachyon/issues",
+  "icon": "icon.png",
+  "server": {
+    "type": "binary",
+    "entry_point": "server/tachyon.exe",
+    "mcp_config": {
+      "command": "${__dirname}/server/tachyon.exe",
+      "args": ["mcp"],
+      "env": {
+        "TACHYON_CONFIG": "${user_config.config_file}"
+      }
+    }
+  },
+  "tools": [
+    { "name": "get_status", "description": "What the NVIDIA GPU is doing right now: load, temperature, power, VRAM, clocks, CPU and RAM, bottleneck, VRAM forecast, running job and last crash headline." },
+    { "name": "get_bottleneck", "description": "Why is it slow? The current bottleneck in one sentence with a confidence, the process involved and the readings behind it." },
+    { "name": "get_vram_forecast", "description": "VRAM use and trend: when it will be full at the current rate, the fastest-growing process and idle apps holding VRAM." },
+    { "name": "get_processes", "description": "Processes using the GPU with their category, VRAM and engine use." },
+    { "name": "get_blackbox", "description": "The last minutes from Tachyon's flight recorder (peaks, per-minute timeline, optional samples) and the last crash report." },
+    { "name": "get_history", "description": "Recent finished render jobs and GPU-busy sessions: duration, GPU load, fps, energy, peak VRAM, temperature and throttling." },
+    { "name": "compare_last_run", "description": "Compares the latest job (optionally filtered by name) with the previous run of the same job." }
+  ],
+  "tools_generated": false,
+  "prompts_generated": false,
+  "keywords": ["tachyon", "nvidia", "gpu", "vram", "render", "monitor", "windows"],
+  "license": "MIT OR Apache-2.0",
+  "compatibility": {
+    "platforms": ["win32"]
+  },
+  "user_config": {
+    "config_file": {
+      "type": "file",
+      "title": "Tachyon settings file (tachyon.toml)",
+      "description": "The tachyon.toml of your installed Tachyon (next to tachyon.exe, or in %LOCALAPPDATA%\\Tachyon for winget/Scoop installs). Turn on Settings > AI agents > Agent API in Tachyon first; without it every tool answers that the agent API is off.",
+      "required": true
+    }
+  }
+}
