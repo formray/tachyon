@@ -23,8 +23,10 @@ fn run_mcp() {
 #[cfg(windows)]
 fn main() {
     if mcp_requested() {
+        tachyon::crashlog::install("mcp", |_| {});
         return run_mcp();
     }
+    tachyon::crashlog::install("gui", gui::crash_box);
     gui::run();
 }
 

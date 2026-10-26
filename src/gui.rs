@@ -530,6 +530,48 @@ struct App {
 
 static mut APP: *mut App = null_mut();
 #[allow(static_mut_refs)]
+/// After a panic (the log is written): tell the user once, without any technical noise.
+pub fn crash_box(log: Option<&std::path::Path>) {
+    let where_ = log.map(|p| format!("\n\nA short report was saved to:\n{}", p.display())).unwrap_or_default();
+    let text = wz(&format!("Tachyon hit an internal error and closed. Start it again to carry on.{where_}"));
+    let title = wz("Tachyon");
+    unsafe {
+        MessageBoxW(null_mut(), text.as_ptr(), title.as_ptr(), MB_OK | MB_ICONWARNING | MB_TOPMOST | MB_SETFOREGROUND);
+    }
+}
+
+/// Posted by a second start to the running Tachyon: show yourself.
+const WM_TACHYON_SHOW: u32 = WM_APP + 1;
+const MAIN_CLASS: &str = "TachyonV5";
+
+/// Mutex name for one settings file: the same file means the same Tachyon.
+pub(crate) fn instance_name(config: &std::path::Path) -> String {
+    let key = config.to_string_lossy().to_lowercase();
+    let h = key.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3));
+    format!("Local\\TachyonInstance-{h:016x}")
+}
+
+/// One Tachyon per settings file. A second start shows the running one and exits.
+unsafe fn single_instance(config: &std::path::Path) -> bool {
+    use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
+    use windows_sys::Win32::System::Threading::CreateMutexW;
+    let sa = tachyon::winsec::Private::new();
+    let name = wz(&instance_name(config));
+    let h = CreateMutexW(sa.as_ref().map_or(null(), |s| s.ptr()), 0, name.as_ptr());
+    if h.is_null() {
+        return true; // cannot tell: better two than none
+    }
+    if GetLastError() != ERROR_ALREADY_EXISTS {
+        return true; // ours for the life of the process (never closed)
+    }
+    let cls = wz(MAIN_CLASS);
+    let other = FindWindowW(cls.as_ptr(), null());
+    if !other.is_null() {
+        PostMessageW(other, WM_TACHYON_SHOW, 0, 0);
+    }
+    false
+}
+
 /// Shown in the panel on the very first start.
 const WELCOME: &str = "Welcome to Tachyon. Right-click it (or use the gear) for Settings. Modes: island at the top of the screen, Hex on the desktop, or this panel.";
 
@@ -557,8 +599,17 @@ pub fn run() {
         let m0 = mem_mb();
         let mut mem_log = vec![("start", m0.0, m0.1)];
         let path = config::config_path();
+        if !single_instance(&path) {
+            return;
+        }
         let loaded = config::load(&path);
-        let (cfg, warn, first_run, path) = (loaded.cfg, loaded.warn, loaded.first_run, loaded.path);
+        let (cfg, mut warn, first_run, path) = (loaded.cfg, loaded.warn, loaded.first_run, loaded.path);
+        if let Some(log) = tachyon::crashlog::logs_dir().and_then(|d| tachyon::crashlog::take_last(&d)) {
+            warn.get_or_insert_with(|| format!("Tachyon closed after an internal error last time. Report: {}", log.display()));
+        }
+        if std::env::var_os("TACHYON_TEST_PANIC").is_some() {
+            panic!("test panic (TACHYON_TEST_PANIC)");
+        }
         let mut dw = Dw::new();
         if let (Some(d), Some(path)) = (dw.as_mut(), std::env::var_os("TACHYON_DWTEST")) {
             let _ = std::fs::write(
@@ -573,7 +624,7 @@ pub fn run() {
         let m2 = mem_mb();
         mem_log.push(("NVML + first sample", m2.0, m2.1));
         let hinst = GetModuleHandleW(null());
-        let cls = wz("TachyonV5");
+        let cls = wz(MAIN_CLASS);
         let icon = LoadIconW(hinst, 1 as _);
         let wc = WNDCLASSEXW {
             cbSize: size_of::<WNDCLASSEXW>() as u32,
@@ -670,14 +721,15 @@ pub fn run() {
             };
             ap.set = Some(Box::new(settings::SetUi::new(tab)));
         }
-        // the first start opens the panel, where the welcome hint is
-        let start = if first_run && std::env::var_os("TACHYON_VIEW").is_none() { UiMode::Panel } else { ap.cfg.start_mode() };
+        // the first start, and a start with something to say, open the panel where the message is
+        let speak = first_run || ap.warn.is_some();
+        let start = if speak && std::env::var_os("TACHYON_VIEW").is_none() { UiMode::Panel } else { ap.cfg.start_mode() };
         ap.mode = start;
         if start != UiMode::Companion {
             ap.cfg.window.compact = start == UiMode::Island;
         }
         let island = start == UiMode::Island;
-        let hwnd = present::create("TachyonV5", "Tachyon", if island { WS_EX_NOACTIVATE } else { 0 }, hinst);
+        let hwnd = present::create(MAIN_CLASS, "Tachyon", if island { WS_EX_NOACTIVATE } else { 0 }, hinst);
         if hwnd.is_null() {
             return;
         }
@@ -2078,6 +2130,20 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         a.hwnd = hwnd;
     }
     match msg {
+        WM_TACHYON_SHOW => {
+            a.hint = Some("Tachyon was already running: here it is. Right-click for Settings.".into());
+            a.fg_valid = false;
+            if a.mode == UiMode::Companion {
+                if a.main_hidden {
+                    a.open_panel_from_companion();
+                }
+            } else if a.cfg.window.compact {
+                a.toggle_island();
+            }
+            a.frame(true);
+            SetForegroundWindow(hwnd);
+            return 0;
+        }
         WM_NCHITTEST => {
             if a.anim.is_some() {
                 return HTCLIENT as LRESULT;
