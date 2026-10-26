@@ -183,12 +183,15 @@ pub fn why_lines(v: Option<&crate::explain::Verdict>) -> Vec<Line> {
     out
 }
 
-/// The one-time crash announcement.
+/// The one-time crash announcement: what happened, the probable cause (when there is one)
+/// and the readings just before.
 pub fn announcement_lines(r: &crate::report::Report) -> Vec<Line> {
-    vec![
-        Line { words: vec![(r.headline.clone(), Tone::Warm)], render: false },
-        Line { words: vec![(r.just_before.clone(), Tone::Quiet)], render: false },
-    ]
+    let mut v = vec![Line { words: vec![(r.headline.clone(), Tone::Warm)], render: false }];
+    if let Some(d) = r.diagnosis.as_ref().filter(|d| !d.causes.is_empty()) {
+        v.push(Line { words: vec![(d.short_line(), Tone::Plain)], render: false });
+    }
+    v.push(Line { words: vec![(r.just_before.clone(), Tone::Quiet)], render: false });
+    v
 }
 
 #[cfg(test)]
@@ -323,5 +326,33 @@ mod tests {
         assert_eq!(l[1].text(), "Main process: ffmpeg.exe (Video)");
         assert_eq!(l[2].text(), "GPU 41% · decoder 93% · encoder 0%");
         assert!(why_lines(None)[0].text().starts_with("No reading yet."));
+    }
+
+    #[test]
+    fn announcement_names_the_probable_cause() {
+        let mut r: crate::report::Report = serde_json::from_value(serde_json::json!({
+            "cause": "restart", "stopped_ms": 0, "boot_ms": null, "headline": "Your PC restarted unexpectedly at 21:43.",
+            "just_before": "Just before: GPU at 97%.", "peaks_last_minute": { "power_throttled_s": 0, "thermal_throttled_s": 0 },
+            "peaks": { "power_throttled_s": 0, "thermal_throttled_s": 0 }, "vram_holder": null, "timeline": [], "events": [],
+            "events_note": null, "samples": 0, "recorded_from_ms": null, "created_ms": 0
+        }))
+        .unwrap();
+        let t = |r: &crate::report::Report| announcement_lines(r).iter().map(|l| l.text()).collect::<Vec<_>>();
+        assert_eq!(t(&r), ["Your PC restarted unexpectedly at 21:43.", "Just before: GPU at 97%."], "a 1.0 report");
+        r.diagnosis = Some(crate::diagnose::Diagnosis {
+            causes: vec![crate::diagnose::Ranked {
+                suspect: crate::diagnose::Suspect::Ram,
+                label: "Unstable RAM or memory overclock (EXPO/XMP)".into(),
+                percent: 45,
+                evidence: vec![],
+                advice: String::new(),
+            }],
+            confidence: "likely".into(),
+            sentence: String::new(),
+            normal: vec![],
+            note: String::new(),
+        });
+        assert_eq!(t(&r)[1], "Likely cause: unstable RAM / EXPO (45%).");
+        assert_eq!(t(&r).len(), 3);
     }
 }

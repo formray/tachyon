@@ -245,6 +245,9 @@ impl App {
             }
             y = y2 + 10.0;
         });
+        if let Some(d) = &r.diagnosis {
+            y = self.draw_diagnosis(g, d, x0, xr, y);
+        }
         // peaks: two columns of label / value rows
         let p = &r.peaks_last_minute;
         let mut cells: Vec<(&str, String)> = vec![];
@@ -315,6 +318,63 @@ impl App {
             }
         }
         self.export_note(g, x0, w, y + 8.0)
+    }
+
+    /// The ranked probable causes: label, share and a bar each; the top one's advice; the
+    /// evidence behind each and what looked normal behind "Evidence ›".
+    fn draw_diagnosis(&mut self, g: &mut G, d: &tachyon::diagnose::Diagnosis, x0: f32, xr: f32, mut y: f32) -> f32 {
+        let w = xr - x0;
+        let cap = format!("PROBABLE CAUSE · {}", d.confidence.to_uppercase());
+        g.stat(|g| g.cap(&cap, x0, y + 10.0, 9.5, H::L, V::Base));
+        if !d.causes.is_empty() {
+            let label = if self.show_why { "Hide evidence" } else { "Evidence ›" };
+            self.link(g, label, xr, y + 10.5, Btn::Why);
+        }
+        y += 18.0;
+        if d.causes.is_empty() {
+            for row in wrap_g(g, &d.sentence, Face::Sans, 12.0, w, 2) {
+                g.stat(|g| g.text(&row, x0, y + 13.0, Face::Sans, 12.0, TEXT2, H::L, V::Base));
+                y += 17.0;
+            }
+            return y + 8.0;
+        }
+        for (k, c) in d.causes.iter().take(3).enumerate() {
+            let (col, face) = if k == 0 { (T_AMBER, Face::SansSemi) } else { (TEXT, Face::Sans) };
+            let pct = format!("{}%", c.percent);
+            let lab = g.fit(&c.label, face, 12.5, w - 48.0);
+            let frac = c.percent as f32 / 100.0;
+            g.stat(|g| {
+                g.text(&lab, x0, y + 13.0, face, 12.5, col, H::L, V::Base);
+                g.text(&pct, xr, y + 13.0, Face::SansSemi, 12.5, col, H::Rt, V::Base);
+                g.fill_rrect(R::new(x0, y + 19.0, w, 3.0), 1.5, (255, 255, 255), 0.12);
+                g.fill_rrect(R::new(x0, y + 19.0, (w * frac).max(3.0), 3.0), 1.5, if k == 0 { AMBER } else { CYAN }, 0.85);
+            });
+            y += 27.0;
+            if k == 0 {
+                for row in wrap_g(g, &format!("Try: {}", c.advice), Face::Sans, 11.5, w, 3) {
+                    g.stat(|g| g.text(&row, x0, y + 12.0, Face::Sans, 11.5, TEXT2, H::L, V::Base));
+                    y += 16.0;
+                }
+                y += 4.0;
+            }
+            if self.show_why {
+                for e in &c.evidence {
+                    let e = g.fit(&format!("· {e}"), Face::Sans, 11.0, w);
+                    g.stat(|g| g.text(&e, x0, y + 12.0, Face::Sans, 11.0, TEXT2, H::L, V::Base));
+                    y += 15.0;
+                }
+                y += 4.0;
+            }
+        }
+        if self.show_why {
+            for n in d.normal.iter().chain(std::iter::once(&d.note)) {
+                for row in wrap_g(g, n, Face::Sans, 11.0, w, 2) {
+                    g.stat(|g| g.text(&row, x0, y + 12.0, Face::Sans, 11.0, T_CYAN, H::L, V::Base));
+                    y += 15.0;
+                }
+            }
+        }
+        y + 8.0
     }
 
     fn export_note(&mut self, g: &mut G, x0: f32, w: f32, mut y: f32) -> f32 {
