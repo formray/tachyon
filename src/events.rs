@@ -32,6 +32,10 @@ impl SysEvent {
     pub fn describe(&self) -> String {
         let code = self.code.as_ref().map(|c| format!(", code {c}")).unwrap_or_default();
         match (self.provider.as_str(), self.id) {
+            (KERNEL_POWER, 41) if self.bugcheck().is_some() => format!(
+                "Windows restarted after a blue screen (Kernel-Power 41 with bug check {}): a system crash, not a power loss.",
+                self.code.as_deref().unwrap_or_default()
+            ),
             (KERNEL_POWER, 41) => format!(
                 "Windows restarted without shutting down cleanly (Kernel-Power 41{code}): power loss, a hard freeze or a forced restart."
             ),
@@ -331,7 +335,9 @@ mod tests {
         assert_eq!(e.code.as_deref(), Some("0x00000116"));
         assert_eq!(e.t_ms, chrono::DateTime::parse_from_rfc3339("2026-10-25T21:43:12.5Z").unwrap().timestamp_millis());
         assert!(e.is_restart() && !e.is_gpu());
-        assert!(e.describe().starts_with("Windows restarted without shutting down cleanly (Kernel-Power 41, code 0x00000116)"));
+        assert!(e.describe().starts_with(
+            "Windows restarted after a blue screen (Kernel-Power 41 with bug check 0x00000116): a system crash, not a power loss."
+        ));
         let n = parse_event_xml(NV153).unwrap();
         assert_eq!((n.provider.as_str(), n.id, n.code.as_deref()), ("nvlddmkm", 153, None));
         assert!(n.is_gpu());
