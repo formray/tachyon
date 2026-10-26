@@ -3,7 +3,9 @@
    v3: if C:\\rmfake\\procs.txt exists, the GPU 0 process list comes from it, one process per line:
    "<pid> <vram_mb or -1> <G|C> <sm> <enc> <dec>" (real wine PIDs, so Toolhelp can resolve them).
    v4: energy counter, PCIe link generation/width, and C:\\rmfake\\scenario.txt (one word, re-read
-   every second) to steer the 1.0 analysis: decode | ramp | idle | busy | hot. */
+   every second) to steer the 1.0 analysis: decode | ramp | idle | busy | hot.
+   1.1: overclock queries (clock offsets, power limit and its default, rated boost) for the crash
+   diagnosis; the `oc` scenario reports an Afterburner-style +150 core / +1000 memory and 111%. */
 #include <stdio.h>
 #include <windows.h>
 #include <math.h>
@@ -19,7 +21,7 @@ static int idx(void*d){ return (int)(size_t)d - 1; }
    7 nodriver (nvmlInit = DRIVER_NOT_LOADED); t0 = when it started */
 static int SC; static double SC_T0, SC_READ = -10;
 static int sc(void){ double t=T(); if(t-SC_READ>=1.0){ SC_READ=t; char w[32]={0}; FILE*f=fopen("C:\\rmfake\\scenario.txt","r"); int n=0;
-  if(f){ if(fscanf(f,"%31s",w)==1){ n= !strcmp(w,"decode")?1: !strcmp(w,"ramp")?2: !strcmp(w,"idle")?3: !strcmp(w,"busy")?4: !strcmp(w,"hot")?5: !strcmp(w,"lost")?6: !strcmp(w,"nodriver")?7:0; } fclose(f); }
+  if(f){ if(fscanf(f,"%31s",w)==1){ n= !strcmp(w,"decode")?1: !strcmp(w,"ramp")?2: !strcmp(w,"idle")?3: !strcmp(w,"busy")?4: !strcmp(w,"hot")?5: !strcmp(w,"lost")?6: !strcmp(w,"nodriver")?7: !strcmp(w,"oc")?8:0; } fclose(f); }
   if(n!=SC){ SC=n; SC_T0=t; } } return SC; }
 static double ramp_mb(void){ return sc()==2 ? 25.0*(T()-SC_T0) : 0.0; }
 EXP int nvmlInit_v2(void){ SC_READ=-10; return sc()==7 ? 9 : 0;}
@@ -43,7 +45,13 @@ EXP int nvmlDeviceGetPowerUsage(void*d,unsigned*p){int s=sc(); *p = s==3?40000 :
 EXP int nvmlDeviceGetTotalEnergyConsumption(void*d,unsigned long long*e){ *e = 5000000000ULL + (unsigned long long)(T()*300000.0); return 0;}
 EXP int nvmlDeviceGetCurrPcieLinkGeneration(void*d,unsigned*g){*g=5;return 0;}
 EXP int nvmlDeviceGetCurrPcieLinkWidth(void*d,unsigned*w){*w=16;return 0;}
-EXP int nvmlDeviceGetEnforcedPowerLimit(void*d,unsigned*p){*p=360000;return 0;}
+EXP int nvmlDeviceGetEnforcedPowerLimit(void*d,unsigned*p){*p= sc()==8?400000:360000;return 0;}
+EXP int nvmlDeviceGetPowerManagementLimit(void*d,unsigned*p){*p= sc()==8?400000:360000;return 0;}
+EXP int nvmlDeviceGetPowerManagementDefaultLimit(void*d,unsigned*p){*p=360000;return 0;}
+EXP int nvmlDeviceGetGpcClkVfOffset(void*d,int*o){*o= sc()==8?150:0;return 0;}
+EXP int nvmlDeviceGetMemClkVfOffset(void*d,int*o){*o= sc()==8?1000:0;return 0;}
+EXP int nvmlDeviceGetMaxCustomerBoostClock(void*d,unsigned t,unsigned*c){ if(t!=0) return 3; *c=2617;return 0;}
+
 EXP int nvmlDeviceGetClockInfo(void*d,unsigned t,unsigned*c){*c= t==2?15001:(unsigned)(2640+60*sin(T()/2));return 0;}
 EXP int nvmlDeviceGetMaxClockInfo(void*d,unsigned t,unsigned*c){*c= t==2?15001:3090;return 0;}
 EXP int nvmlDeviceGetFanSpeed(void*d,unsigned*p){ if(idx(d)==1) return 3; *p=(unsigned)(62+5*sin(T()/6));return 0;}

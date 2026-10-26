@@ -93,6 +93,7 @@ type FnProcV2 = unsafe extern "C" fn(Dev, *mut c_uint, *mut ProcV2) -> Ret;
 type FnProcV1 = unsafe extern "C" fn(Dev, *mut c_uint, *mut ProcV1) -> Ret;
 type FnProcUtil = unsafe extern "C" fn(Dev, *mut ProcUtil, *mut c_uint, c_ulonglong) -> Ret;
 type FnPidName = unsafe extern "C" fn(c_uint, *mut c_char, c_uint) -> Ret;
+type FnI32 = unsafe extern "C" fn(Dev, *mut c_int) -> Ret;
 
 #[derive(Default)]
 struct Api {
@@ -123,6 +124,58 @@ struct Api {
     energy: Option<FnU64>,
     link_gen: Option<FnU32>,
     link_width: Option<FnU32>,
+    // read now and then for the crash diagnosis (overclock indicators), never set
+    gpc_offset: Option<FnI32>,
+    mem_offset: Option<FnI32>,
+    plim_set: Option<FnU32>,
+    plim_default: Option<FnU32>,
+    boost_clock: Option<FnArgU32>,
+}
+
+/// Overclock indicators the driver reports (read-only): clock offsets as set by tools such as
+/// MSI Afterburner, the power limit against its default, and the rated boost clock.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct OcInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub core_offset_mhz: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mem_offset_mhz: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub power_limit_w: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_power_limit_w: Option<f32>,
+    /// The card's rated boost clock (GPU Boost often runs above it on its own).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rated_boost_mhz: Option<u32>,
+}
+
+impl OcInfo {
+    /// Power limit as a percentage of the default, when both are known.
+    pub fn power_limit_pct(&self) -> Option<f32> {
+        match (self.power_limit_w, self.default_power_limit_w) {
+            (Some(l), Some(d)) if d > 0.0 => Some(l / d * 100.0),
+            _ => None,
+        }
+    }
+
+    /// Plain lines for what is above stock (empty when nothing is, or nothing is known).
+    pub fn above_stock(&self) -> Vec<String> {
+        let mut v = vec![];
+        if let Some(c) = self.core_offset_mhz.filter(|c| *c > 0) {
+            v.push(format!("GPU core clock offset +{c} MHz"));
+        }
+        if let Some(m) = self.mem_offset_mhz.filter(|m| *m > 0) {
+            v.push(format!("GPU memory clock offset +{m} MHz"));
+        }
+        if let Some(p) = self.power_limit_pct().filter(|p| *p > 101.0) {
+            v.push(format!("GPU power limit at {p:.0}% of default"));
+        }
+        v
+    }
+
+    pub fn is_empty(&self) -> bool {
+        *self == OcInfo::default()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -297,6 +350,11 @@ impl Nvml {
             energy: sym!("nvmlDeviceGetTotalEnergyConsumption"),
             link_gen: sym!("nvmlDeviceGetCurrPcieLinkGeneration"),
             link_width: sym!("nvmlDeviceGetCurrPcieLinkWidth"),
+            gpc_offset: sym!("nvmlDeviceGetGpcClkVfOffset"),
+            mem_offset: sym!("nvmlDeviceGetMemClkVfOffset"),
+            plim_set: sym!("nvmlDeviceGetPowerManagementLimit"),
+            plim_default: sym!("nvmlDeviceGetPowerManagementDefaultLimit"),
+            boost_clock: sym!("nvmlDeviceGetMaxCustomerBoostClock"),
         };
         let init: FnV = sym!("nvmlInit_v2", "nvmlInit").ok_or("nvmlInit missing")?;
         let r = unsafe { init() };
@@ -505,6 +563,47 @@ impl Nvml {
         s
     }
 
+    /// Overclock indicators for device `idx` (a few cheap queries; call now and then, not per tick).
+    pub fn oc_info(&mut self, idx: u32) -> OcInfo {
+        let mut o = OcInfo::default();
+        let Some(&d) = self.handles.get(idx as usize) else { return o };
+        let a = std::mem::take(&mut self.api);
+        unsafe {
+            if let Some(f) = a.gpc_offset {
+                let mut v = 0;
+                if self.try_call(idx, "gpcoff", || f(d, &mut v)) {
+                    o.core_offset_mhz = Some(v);
+                }
+            }
+            if let Some(f) = a.mem_offset {
+                let mut v = 0;
+                if self.try_call(idx, "memoff", || f(d, &mut v)) {
+                    o.mem_offset_mhz = Some(v);
+                }
+            }
+            if let Some(f) = a.plim_set {
+                let mut v = 0;
+                if self.try_call(idx, "plimset", || f(d, &mut v)) {
+                    o.power_limit_w = Some(v as f32 / 1000.0);
+                }
+            }
+            if let Some(f) = a.plim_default {
+                let mut v = 0;
+                if self.try_call(idx, "plimdef", || f(d, &mut v)) {
+                    o.default_power_limit_w = Some(v as f32 / 1000.0);
+                }
+            }
+            if let Some(f) = a.boost_clock {
+                let mut v = 0;
+                if self.try_call(idx, "boost", || f(d, CLOCK_GRAPHICS, &mut v)) {
+                    o.rated_boost_mhz = Some(v);
+                }
+            }
+        }
+        self.api = a;
+        o
+    }
+
     fn list_v2(&mut self, idx: u32, key: &'static str, f: FnProcV2, d: Dev) -> Option<Vec<(u32, Option<f64>)>> {
         let mut buf = vec![ProcV2::default(); 64];
         let mut n = buf.len() as c_uint;
@@ -655,6 +754,24 @@ mod tests {
         assert_eq!(exe_name("/usr/bin/python3"), "python3");
         assert_eq!(exe_name("dwm.exe"), "dwm.exe");
     }
+    #[test]
+    fn overclock_indicators() {
+        let stock = OcInfo {
+            core_offset_mhz: Some(0),
+            mem_offset_mhz: Some(0),
+            power_limit_w: Some(360.0),
+            default_power_limit_w: Some(360.0),
+            rated_boost_mhz: Some(2617),
+        };
+        assert!(stock.above_stock().is_empty() && !stock.is_empty());
+        let oc = OcInfo { core_offset_mhz: Some(150), mem_offset_mhz: Some(1000), power_limit_w: Some(400.0), ..stock };
+        assert_eq!(
+            oc.above_stock(),
+            ["GPU core clock offset +150 MHz", "GPU memory clock offset +1000 MHz", "GPU power limit at 111% of default"]
+        );
+        assert!(OcInfo::default().is_empty() && OcInfo::default().above_stock().is_empty());
+    }
+
     #[test]
     fn ffi_layouts_match_nvml_headers() {
         assert_eq!(std::mem::size_of::<ProcV2>(), 24);
