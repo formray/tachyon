@@ -54,8 +54,13 @@ polling, no cloud, no AI model):
   spent 6 min power-throttled"). Set `price_per_kwh` to see what each job cost.
 - **For AI agents: `tachyon.exe mcp`.** A local [MCP](https://modelcontextprotocol.io)
   server with seven read-only tools, so an assistant like Claude Desktop or Cursor can ask
-  what the GPU is doing and why. Off until you set `agent_api = true`; it runs on pipes, not
-  the network.
+  what the GPU is doing and why. Off until you turn it on in Settings (or set
+  `agent_api = true`); it runs on pipes, not the network.
+- **Settings page.** Right-click the island, Hex or the panel and pick *Settings…*, or
+  use the gear in the panel. Mode, refresh rate, project folders, alert thresholds, the
+  flight recorder, the job history, the energy price and the agent API, with a *Copy MCP
+  config* button. Changes are saved as you make them and apply at once; only the flight
+  recorder needs a restart.
 
 Carried over from the previews:
 
@@ -146,6 +151,31 @@ In the panel, *Why? ›* next to the bottleneck explains it, *Open report ›*
 opens the crash report and *History ›* the job list. In Hex's bubble, *Why
 is it slow? ›* swaps the bubble for the answer.
 
+### Settings
+
+<img alt="The Settings page, General tab (wine, fake driver, synthetic values)" src="docs/v1_settings.png" width="420">
+
+*Settings…* in the right-click menu (island, Hex or panel), or the gear at the
+top of the panel. Five tabs:
+
+| Tab | What you can change |
+|---|---|
+| General | Display mode (island, Hex, panel); whether Hex announces crash reports; how long Hex's bubble stays open (5–30 s or until clicked); refresh rate (0.25–2 s) |
+| Projects | Render folders to watch (up to 12): add with a folder picker, remove with × |
+| Alerts | Temperature amber and red; VRAM amber and red (GB); how far ahead the VRAM forecast warns (5–60 min, or off) |
+| Data | Flight recorder on/off and how many minutes it keeps; job history on/off; energy price and currency |
+| AI agents | Agent API on/off with its live state, *Copy MCP config*, and what agents can and cannot do |
+
+Use the − and + buttons or the mouse wheel over a value. Each change is
+checked against those limits, saved straight away and applied while Tachyon
+runs; the flight recorder is the one setting that says *restart to apply*.
+The file is written to a temporary file first and then renamed, so a crash
+mid-save cannot leave half a file; the first change of each visit keeps the
+previous file as `tachyon.toml.bak`. Comments, unknown keys and anything the
+page does not show are kept. The page only edits `tachyon.toml`; it changes
+nothing in Windows. There is no *Start with Windows* switch yet: put a
+shortcut to `tachyon.exe` in `shell:startup`.
+
 On first start `tachyon.toml` is written next to the exe. Leave anything
 out and the default is used; positions and the mode are saved on exit
 without touching your comments.
@@ -165,6 +195,9 @@ history = true              # job history
 # price_per_kwh = 0.30      # optional: show the energy cost of each job
 currency = "EUR"
 agent_api = false           # true = let `tachyon.exe mcp` answer AI agents
+hex_announce = true         # Hex opens its bubble once after an unexpected stop
+bubble_close_secs = 8       # Hex's bubble closes after this; 0 = only when clicked
+vram_forecast_minutes = 15  # warn when VRAM would be full this soon; 0 = off
 
 [gpu]
 # util_band_low = 77        # optional: cyan inside the band, amber above it
@@ -172,6 +205,7 @@ agent_api = false           # true = let `tachyon.exe mcp` answer AI agents
 temp_amber_c = 80.0         # also when Hex gets warm
 temp_red_c = 83.0
 vram_amber_mb = 14500.0
+vram_red_mb = 15600.0
 
 [window]                    # written for you on exit
 always_on_top = true
@@ -201,8 +235,11 @@ false` or `history = false`, and delete the folder to remove everything.
 
 ### AI agents (MCP)
 
-Set `agent_api = true` and restart Tachyon. Then add it to your MCP client;
-for Claude Desktop (`claude_desktop_config.json`) or Cursor (`.cursor/mcp.json`):
+Open *Settings… → AI agents* and turn on *Agent API*; it starts at once.
+*Copy MCP config* puts the client entry on the clipboard with the full path
+of this `tachyon.exe`. Paste it into your MCP client: for Claude Desktop
+`claude_desktop_config.json`, for Cursor `.cursor/mcp.json`. Without the page,
+set `agent_api = true` and restart Tachyon. The entry looks like this:
 
 ```json
 {
@@ -293,6 +330,12 @@ are about where they were. Most of the resident memory is wine itself, and
 wine neither trims the working set nor reports private bytes, so these
 figures say how the modes and versions compare, not what Windows will show.
 
+The Settings page costs nothing while it is closed: it holds no state and
+no timer then. Measured the same way against the 1.0 build without it,
+alternating, panel idle came out at 1.50–2.23 % vs 1.37–1.93 %, island
+idle 0.40 % vs 0.40 %, Hex idle 0.40 % vs 0.43 %, with 1–2 MB more resident
+memory (a slightly larger exe: 1,846,272 bytes).
+
 ## Screenshots
 
 Taken under wine with the fake driver and a procedurally generated
@@ -309,6 +352,7 @@ under wine.
 | ![Hex: the video decoder is the limit](docs/v1_hex_bottleneck.png) | ![Crash report](docs/v1_crash_report.png) |
 | ![VRAM forecast warning in Hex](docs/v1_vram_forecast.png) | ![Job history](docs/v1_history.png) |
 | ![island while rendering](docs/island_render.png) | ![Hex with its bubble](docs/hex_bubble.png) |
+| ![Settings: General](docs/v1_settings.png) | ![Settings: AI agents, agent API on](docs/v1_settings_ai.png) |
 
 ## Known limits
 
@@ -327,7 +371,7 @@ under wine.
   `glass = "blur"` is experimental (it may show jagged edges or a blurred
   rectangle), which is why `auto` stays on the tint.
 - **Bubble:** Esc does not close it (it never takes keyboard focus): click
-  Hex or the bubble, or wait 8 s. It opens with a fade and a slide, not a
+  Hex or the bubble, or wait 8 s (change it in Settings). It opens with a fade and a slide, not a
   scale.
 - The **fullscreen pause** has not been tested on Windows.
 - **Click-through:** halo pixels with alpha of 96/255 or more take clicks;

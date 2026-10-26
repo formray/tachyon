@@ -27,11 +27,17 @@ New in 1.0
 - Job history: every finished render, or any stretch of a minute or more with the
   GPU busy, with its duration, load, energy in Wh, peak temperature and VRAM and
   time spent throttled, compared with the previous run of the same job
-  ("14% slower than last time"). Right-click > "Job history". Set
-  price_per_kwh in tachyon.toml to see the cost.
+  ("14% slower than last time"). Right-click > "Job history". Set an energy
+  price in Settings > Data to see the cost.
 - For AI assistants: "tachyon.exe mcp" lets an MCP client such as Claude Desktop
-  or Cursor ask what the GPU is doing. It is off until you set agent_api = true
-  in tachyon.toml; see the README on GitHub for the setup.
+  or Cursor ask what the GPU is doing. It is off until you turn on "Agent API"
+  in Settings > AI agents; "Copy MCP config" there copies the entry to paste
+  into your MCP client.
+- Settings: right-click > "Settings..." (or the gear in the panel). Change the
+  mode, refresh rate, render folders, alert thresholds, crash recorder, job
+  history, energy price and the agent API. Changes are saved and applied at
+  once; only the crash recorder needs a restart. The previous file is kept as
+  tachyon.toml.bak.
 
 Tachyon 5.0 and 5.1 were preview builds before 1.0. What they brought:
 
@@ -42,7 +48,8 @@ Hex, the desktop companion
   card is hot. It goes to sleep after 10 quiet minutes.
 - Click Hex for a speech bubble: render progress and ETA, GPU load and
   temperature, the program using the most video memory, four key numbers, and
-  "Open panel" for the full window. Click again (or wait 8 s) to close it.
+  "Open panel" for the full window. Click again (or wait 8 s; change it in
+  Settings) to close it.
 - Drag Hex anywhere; its position is remembered.
 - Right-click Hex, the island or the panel and pick "Mode" to switch between
   island, companion (Hex) and panel. The choice is remembered (mode = ... in
@@ -72,14 +79,18 @@ How to use
   full panel. In the panel, press the small island button (or double-click the
   top bar) to go back. Drag either one to move it; positions are remembered.
 - "Pin" keeps the panel on top. Right-click for a menu (GPU, pin, mode, crash
-  report, job history, export, quit).
+  report, job history, export, settings, quit).
 - Tachyon has no taskbar button; use the island or the right-click menu.
 - On first start it creates tachyon.toml next to the exe. That file holds the
   settings (colour thresholds, refresh rate, glass style, process categories)
-  and remembers the window and island positions.
+  and remembers the window and island positions. Most of them are on the
+  Settings page; the rest you can edit in the file and restart Tachyon.
+- There is no "start with Windows" option yet: to start it automatically, put
+  a shortcut to tachyon.exe in the folder that opens with Win+R > shell:startup.
 - The crash report data and job history are kept in
   %LOCALAPPDATA%\Tachyon (paste that into the Explorer address bar).
-- To remove it, close it and delete tachyon.exe, tachyon.toml and that folder.
+- To remove it, close it and delete tachyon.exe, tachyon.toml (and
+  tachyon.toml.bak) and that folder.
   Nothing else is left on your PC.
 
 Windows SmartScreen
@@ -94,7 +105,7 @@ Privacy and safety
 - Program command lines are NOT read unless you set process_cmdline = true.
 - It never changes clocks, fans or power limits, never touches other programs,
   and never connects to the internet.
-- It writes only its own tachyon.toml and its folder in %LOCALAPPDATA%\Tachyon
+- It writes only its own tachyon.toml (and tachyon.toml.bak) and its folder in %LOCALAPPDATA%\Tachyon
   (recorded readings with program names, never paths or command lines; job
   history). Nothing leaves your PC. Set blackbox = false or history = false to
   turn them off.

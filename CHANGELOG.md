@@ -9,8 +9,11 @@ Tachyon 1.0 is the first release. It supersedes the 5.x preview builds: those nu
 - **VRAM forecast:** Theil-Sen trend over two minutes for the card and each process; a warning only when the trend is steady and the card would be full within 15 minutes; idle background apps holding VRAM.
 - **Job history:** finished render jobs and GPU-busy sessions in `%LOCALAPPDATA%\Tachyon\history\jobs.jsonl` with duration, load, fps, energy (driver energy counter, or integrated power), peak VRAM and temperature, throttled time and main limit, compared with the previous run of the same job. History view in the panel. Optional `price_per_kwh` and `currency`.
 - **`tachyon.exe mcp`:** a local MCP server (stdio, protocol 2025-06-18 and earlier) with seven read-only tools for AI agents. Off unless `agent_api = true`; the running app then publishes its status in shared memory every two ticks.
-- New menu items: *Crash report*, *Job history*, *Export flight recorder*.
-- Exe about 1.8 MB (was 1.4 MB).
+- **Settings page:** *Settings…* in the right-click menu (island, Hex, panel) or the gear in the panel. Five tabs: General (mode, Hex announcements, bubble close time, refresh rate), Projects (render folders with a folder picker), Alerts (temperature and VRAM thresholds, forecast horizon), Data (flight recorder, history, energy price and currency) and AI agents (agent API with its live state, *Copy MCP config* with the full exe path). Values are checked, saved as you change them and applied live; only the flight recorder needs a restart. Saves go through a temporary file and a rename, keep `tachyon.toml.bak` and preserve comments and unknown keys. New settings: `hex_announce`, `bubble_close_secs`, `vram_forecast_minutes`.
+- **VRAM used matches `nvidia-smi`:** read with `nvmlDeviceGetMemoryInfo_v2`, which leaves out the memory the driver reserves (about 300 MiB on a 16 GB card); older drivers fall back to the first version.
+- **Job history energy:** a job whose first reading was quiet now still uses the driver's energy counter instead of integrating power.
+- New menu items: *Crash report*, *Job history*, *Export flight recorder*, *Settings…*.
+- Exe about 1.85 MB (was 1.4 MB).
 
 Known limits: still not run on real Windows; Windows events, the energy counter and restart detection are tested with synthetic data only (wine does not answer event log queries). See the README.
 
