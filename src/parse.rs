@@ -440,3 +440,137 @@ pub fn chunk_progress(chunks: &mut [Chunk], total: Option<u64>) -> Option<(u64, 
     let tot = total.unwrap_or(span).max(span);
     Some((done, tot, fin, n))
 }
+
+/// A resolution named in a job name, a path or a log: `3840x2160` (also `×`, `*`, ffmpeg's
+/// `scale=1920:1080`), `4320p`/`2160p`/`1440p`/`1080p`/`720p`, `8k`, `4k`, `uhd`, `qhd`, `fhd`.
+/// The largest explicit size wins over a word (a log may name its input and output sizes).
+pub fn resolution_hint(text: &str) -> Option<(u32, u32)> {
+    let low = text.to_ascii_lowercase();
+    let b = low.as_bytes();
+    let n = b.len();
+    let mut best: Option<(u32, u32)> = None;
+    let mut keep = |w: u32, h: u32| {
+        let (lo, hi) = (w.min(h), w.max(h));
+        if (200..=16384).contains(&lo) && (320..=16384).contains(&hi) && hi as f32 / lo as f32 <= 4.0 {
+            if best.is_none_or(|(bw, bh)| (w as u64 * h as u64) > (bw as u64 * bh as u64)) {
+                best = Some((w, h));
+            }
+        }
+    };
+    let digits_at = |i: usize| {
+        let mut j = i;
+        while j < n && b[j].is_ascii_digit() {
+            j += 1;
+        }
+        (j, low[i..j].parse::<u32>().ok())
+    };
+    // explicit sizes: digits, a separator, digits (separator `x`, `*`, `×` or `:` after scale=)
+    let mut i = 0;
+    while i < n {
+        if b[i].is_ascii_digit() && (i == 0 || !b[i - 1].is_ascii_digit()) {
+            let (j, w) = digits_at(i);
+            if (3..=5).contains(&(j - i)) && j < n {
+                let sep = if b[j] == b'x' || b[j] == b'*' {
+                    Some(j + 1)
+                } else if low[j..].starts_with('×') {
+                    Some(j + '×'.len_utf8())
+                } else if b[j] == b':' && low[..i].ends_with("scale=") {
+                    Some(j + 1)
+                } else {
+                    None
+                };
+                if let Some(k) = sep.filter(|k| *k < n && b[*k].is_ascii_digit()) {
+                    let (e, h) = digits_at(k);
+                    if (3..=5).contains(&(e - k))
+                        && (e == n || !b[e].is_ascii_alphanumeric())
+                        && let (Some(w), Some(h)) = (w, h)
+                    {
+                        keep(w, h);
+                    }
+                }
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    if best.is_some() {
+        return best;
+    }
+    // words: "4k" needs no digit before and no letter or digit after; "uhd" needs non-letters around
+    let word = |w: &str, digit_word: bool| {
+        let mut from = 0;
+        while let Some(p) = low[from..].find(w) {
+            let s = from + p;
+            let e = s + w.len();
+            from = s + 1;
+            let before_ok = s == 0 || if digit_word { !b[s - 1].is_ascii_digit() } else { !b[s - 1].is_ascii_alphabetic() };
+            let after_ok = e == n || !b[e].is_ascii_alphanumeric();
+            if before_ok && after_ok {
+                return true;
+            }
+        }
+        false
+    };
+    for (w, digit_word, res) in [
+        ("8k", true, (7680, 4320)),
+        ("4320p", true, (7680, 4320)),
+        ("4k", true, (3840, 2160)),
+        ("2160p", true, (3840, 2160)),
+        ("uhd", false, (3840, 2160)),
+        ("1440p", true, (2560, 1440)),
+        ("qhd", false, (2560, 1440)),
+        ("1080p", true, (1920, 1080)),
+        ("fhd", false, (1920, 1080)),
+        ("720p", true, (1280, 720)),
+    ] {
+        if word(w, digit_word) {
+            return Some(res);
+        }
+    }
+    None
+}
+
+/// The class a resolution belongs to, for matching runs: "8K", "4K", "1440p", "1080p", "720p",
+/// or "WxH" for anything else.
+pub fn resolution_label((w, h): (u32, u32)) -> String {
+    let long = w.max(h);
+    let short = w.min(h);
+    match long {
+        7000.. => "8K".into(),
+        3800.. => "4K".into(),
+        2500.. if short >= 1300 => "1440p".into(),
+        1900.. => "1080p".into(),
+        1270.. => "720p".into(),
+        _ => format!("{w}x{h}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolution_hints() {
+        let r = |s: &str| resolution_hint(s).map(resolution_label);
+        assert_eq!(r("demo4k · 02x 169 try 1").as_deref(), Some("4K"));
+        assert_eq!(r("mezz_4k_r6").as_deref(), Some("4K"));
+        assert_eq!(r("C:\\work\\projects\\ladial\\work4k\\r_0.log").as_deref(), Some("4K"));
+        assert_eq!(r("Stream #0:0: Video: h264, yuv420p, 3840x2160 [SAR 1:1], 25 fps").as_deref(), Some("4K"));
+        assert_eq!(r("in 1920x1080 -> out 3840×2160").as_deref(), Some("4K"), "the largest size wins");
+        assert_eq!(r("-vf scale=1920:1080").as_deref(), Some("1080p"));
+        assert_eq!(r("shot_1080p_v2").as_deref(), Some("1080p"));
+        assert_eq!(r("teaser UHD final").as_deref(), Some("4K"));
+        assert_eq!(r("2560x1440").as_deref(), Some("1440p"));
+        assert_eq!(r("1080x1920 vertical").as_deref(), Some("1080p"));
+        assert_eq!(r("1024x1024 tiles").as_deref(), Some("1024x1024"));
+        // not resolutions
+        for s in ["64k buffer", "4kb", "speed 1.5x", "time=00:01:02", "frame 1234x", "seq 12x34", "2x 169 try 1", "shout", ""] {
+            assert_eq!(resolution_hint(s), None, "{s}");
+        }
+        let mut rng = crate::fuzz::Rng::new(4);
+        for _ in 0..3000 {
+            let _ = resolution_hint(&String::from_utf8_lossy(&rng.mutate(b"in 1920x1080 -> 3840\xc3\x972160 scale=1:2 4k")));
+        }
+    }
+}
