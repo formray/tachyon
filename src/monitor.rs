@@ -253,6 +253,18 @@ pub fn island_pos(work: (i32, i32, i32, i32), size_px: (i32, i32), cx: Option<f3
     (x, y.clamp(t, (b - size_px.1).max(t)))
 }
 
+/// Top-left that puts a window of `size_px` back inside `work` when too little of it is left
+/// on any screen (a monitor was unplugged or rearranged). `grab_px` of the window, measured
+/// from its top-left, has to be on a screen to count as reachable; `visible` says whether it is.
+/// Returns None when the window can stay where it is.
+pub fn pull_back(at: (i32, i32), size_px: (i32, i32), visible: bool, work: (i32, i32, i32, i32)) -> Option<(i32, i32)> {
+    if visible {
+        return None;
+    }
+    let (l, t, r, b) = work;
+    Some((at.0.clamp(l, (r - size_px.0).max(l)), at.1.clamp(t, (b - size_px.1).max(t))))
+}
+
 /// Synchronous sampler: call `tick` from a timer. No threads.
 pub struct Sampler {
     cfg: Config,
@@ -507,6 +519,18 @@ mod tests {
         assert_eq!(island_pos((0, 0, 1920, 1040), (560, 56), Some(1900.0), Some(5000.0)), (1360, 984));
         // second monitor to the left (negative coordinates)
         assert_eq!(island_pos((-1920, 0, 0, 1040), (380, 44), None, None), (-1150, 10));
+    }
+
+    #[test]
+    fn windows_left_on_an_unplugged_monitor_come_back() {
+        // still on a screen: stays put, even partly off the edge
+        assert_eq!(pull_back((1800, 100), (460, 800), true, (0, 0, 1920, 1040)), None);
+        // the left monitor went away: the panel lands on the edge of the main one
+        assert_eq!(pull_back((-1500, 200), (460, 800), false, (0, 0, 1920, 1040)), Some((0, 200)));
+        // lower than the remaining screen: lifted until it fits
+        assert_eq!(pull_back((300, 2400), (460, 800), false, (0, 0, 1920, 1040)), Some((300, 240)));
+        // bigger than the screen: the top-left stays reachable
+        assert_eq!(pull_back((5000, 5000), (2400, 1600), false, (0, 0, 1920, 1040)), Some((0, 0)));
     }
 
     #[test]

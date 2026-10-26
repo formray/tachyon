@@ -1016,6 +1016,28 @@ impl App {
         }
     }
 
+    /// After a display change: the panel or island and Hex return to the nearest screen when
+    /// their grab area is no longer on any screen. The saved position is left alone, so the
+    /// window goes back there on the next start if that monitor is plugged in again.
+    unsafe fn pull_back_windows(&mut self) {
+        if self.shown && self.anim.is_none() {
+            let s = self.target_shape();
+            let (w, h) = (rw(&s), rh(&s));
+            let grab = RECT { left: s.left, top: s.top, right: s.left + w.min(80), bottom: s.top + h.min(40) };
+            let visible = !MonitorFromRect(&grab, MONITOR_DEFAULTTONULL).is_null();
+            let work = self.work_area_at(s.left, s.top);
+            if let Some((x, y)) = tachyon::monitor::pull_back((s.left, s.top), (w, h), visible, work) {
+                let pad = self.geo.as_ref().map(|g| g.shape.x.round() as i32).unwrap_or(self.pad_px());
+                SetWindowPos(self.hwnd, null_mut(), x - pad, y - pad, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+                self.shape = RECT { left: x, top: y, right: x + w, bottom: y + h };
+                self.frame(true);
+            }
+        }
+        if let Some(c) = self.comp.as_mut() {
+            c.pull_back();
+        }
+    }
+
     fn remember_geometry(&mut self) {
         if self.anim.is_some() {
             return;
@@ -2292,6 +2314,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             return 0;
         }
         WM_ERASEBKGND => return 1,
+        WM_DISPLAYCHANGE => {
+            // a monitor went away or moved: bring back whatever is now off every screen
+            a.pull_back_windows();
+        }
         WM_DPICHANGED => {
             a.scale = ((wp & 0xffff) as f32 / 96.0).max(0.5);
             a.geo = None;

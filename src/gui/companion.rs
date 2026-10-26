@@ -345,6 +345,22 @@ impl Companion {
         }
     }
 
+    /// Back onto the nearest screen when the sprite is no longer on any (monitor unplugged).
+    pub unsafe fn pull_back(&mut self) {
+        let n = self.at.size() as i32;
+        let rc = RECT { left: self.pos.x + n / 4, top: self.pos.y + n / 4, right: self.pos.x + n * 3 / 4, bottom: self.pos.y + n * 3 / 4 };
+        let visible = !MonitorFromRect(&rc, MONITOR_DEFAULTTONULL).is_null();
+        let mon = MonitorFromPoint(self.pos, MONITOR_DEFAULTTONEAREST);
+        let mut mi: MONITORINFO = std::mem::zeroed();
+        mi.cbSize = size_of::<MONITORINFO>() as u32;
+        GetMonitorInfoW(mon, &mut mi);
+        let w = mi.rcWork;
+        if let Some((x, y)) = tachyon::monitor::pull_back((self.pos.x, self.pos.y), (n, n), visible, (w.left, w.top, w.right, w.bottom)) {
+            self.moved_to(x, y);
+            self.draw(None);
+        }
+    }
+
     pub unsafe fn on_dpi(&mut self, dpi: u32) {
         let key = hex::scale_key(dpi as f32 / 96.0);
         if key != self.key {
