@@ -1,5 +1,5 @@
-Tachyon 1.0
-===========
+Tachyon 1.0.1
+=============
 
 The lightest real-time GPU monitor for NVIDIA cards, and the one that explains
 itself.
@@ -9,6 +9,18 @@ load, temperature, VRAM, power, clocks, fan, video encoder/decoder, PCIe
 traffic, what is limiting the clocks, and which programs are using the GPU
 (with the program that launched them and a category: Game, Creative app,
 Script/Python, Browser, AI/agent, System or Other).
+
+New in 1.0.1
+- Easier for anyone: a short hint on first start; a damaged tachyon.toml is
+  kept aside (tachyon.toml.corrupt-...) and Tachyon starts with the defaults;
+  clear messages when there is no NVIDIA driver or the driver resets;
+  starting it twice brings the running one to the front; Settings has
+  "Start with Windows", a GPU picker (with more than one card) and
+  "Reset settings", and works from the keyboard (Tab, Space, arrows, Esc).
+- Windows left on a monitor you unplugged come back to the screen.
+- Safer: everything it reads is size-checked, its shared memory is private to
+  your account, and if it ever crashes it writes a short log in
+  %LOCALAPPDATA%\Tachyon\logs and tells you on the next start.
 
 New in 1.0
 - Crash report: Tachyon keeps the last 15 minutes of readings in two small files
@@ -85,18 +97,20 @@ How to use
   settings (colour thresholds, refresh rate, glass style, process categories)
   and remembers the window and island positions. Most of them are on the
   Settings page; the rest you can edit in the file and restart Tachyon.
-- There is no "start with Windows" option yet: to start it automatically, put
-  a shortcut to tachyon.exe in the folder that opens with Win+R > shell:startup.
+- To start it with Windows, turn on Settings > General > "Start with Windows".
+  It puts a shortcut in your Startup folder (Win+R > shell:startup) and
+  removes it when you turn it off. Off by default.
 - The crash report data and job history are kept in
   %LOCALAPPDATA%\Tachyon (paste that into the Explorer address bar).
-- To remove it, close it and delete tachyon.exe, tachyon.toml (and
-  tachyon.toml.bak) and that folder.
+- To remove it, turn off "Start with Windows", close it and delete
+  tachyon.exe, tachyon.toml (and tachyon.toml.bak) and that folder.
   Nothing else is left on your PC.
 
 Windows SmartScreen
 - The exe is not code-signed, so Windows may say "Windows protected your PC".
   Click "More info", then "Run anyway". Only do this if you got the file from
-  someone you trust.
+  someone you trust, or check it first: in PowerShell, Get-FileHash tachyon.exe
+  must match SHA256SUMS.txt on the release page.
 
 Privacy and safety
 - It only reads. It asks the NVIDIA driver for its sensor values (NVML), the same
@@ -105,7 +119,9 @@ Privacy and safety
 - Program command lines are NOT read unless you set process_cmdline = true.
 - It never changes clocks, fans or power limits, never touches other programs,
   and never connects to the internet.
-- It writes only its own tachyon.toml (and tachyon.toml.bak) and its folder in %LOCALAPPDATA%\Tachyon
+- It never starts other programs, and has no network code at all.
+- It writes only its own tachyon.toml (and tachyon.toml.bak), the Startup
+  shortcut if you turn that on, and its folder in %LOCALAPPDATA%\Tachyon
   (recorded readings with program names, never paths or command lines; job
   history). Nothing leaves your PC. Set blackbox = false or history = false to
   turn them off.

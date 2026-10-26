@@ -1,5 +1,31 @@
 # Changelog
 
+## v1.0.1
+
+Hardening for public use: safer for everyone, easier for anyone. No new readings; everything from 1.0.0 works as before.
+
+**Easier to use**
+- **First start:** defaults with no personal paths, and the panel opens with a short hint on where to find Settings. In a folder you cannot write to, `tachyon.toml` goes to `%LOCALAPPDATA%\Tachyon` instead.
+- **Damaged settings:** a `tachyon.toml` that cannot be read (syntax, wrong types, not UTF-8, over 1 MB) is kept as `tachyon.toml.corrupt-<date>-<time>`; Tachyon starts with the defaults and says so.
+- **No GPU readings:** plain messages for no NVIDIA driver, an old driver and a driver reset (TDR). After a reset Tachyon reconnects every 2 s for a minute, then every 10 s, and keeps running.
+- **One instance:** starting it again brings the running one to the front. `TACHYON_CONFIG` and `TACHYON_DATA_DIR` let a second copy run with its own settings and data.
+- **Settings:** *Start with Windows* (a shortcut in the Startup folder; off by default, no registry), a GPU picker when there is more than one, *Reset settings* (two clicks, keeps the old file as `.bak` and the window positions), and where the data lives and how to remove Tachyon.
+- **Keyboard:** Tab, Shift+Tab, Space, Enter, arrows, Ctrl+Tab and Esc in Settings, with a focus ring; Ctrl+, opens Settings.
+- **Monitors:** windows left on a monitor that was unplugged come back to the nearest screen; the island and panel stop drawing while a fullscreen app is in front, as Hex already did.
+- **Crash log:** if Tachyon itself panics it writes `%LOCALAPPDATA%\Tachyon\logs\panic-<time>.txt`, shows a short message and exits; the next start mentions it.
+
+**Safer**
+- The agent API's shared memory and the single-instance mutex allow only the current user (and SYSTEM), at medium integrity; `tachyon mcp` refuses a section created by another account.
+- Run-time DLLs are loaded from System32 only.
+- Size caps and damage tolerance for everything read from disk: render logs, the flight recorder and its `session.json` (which can no longer name a file outside the recorder folder), `jobs.jsonl` (one damaged line no longer hides the jobs after it), the crash report and the event log XML (a panic on some non-ASCII attributes is fixed). MCP: 1 MB per request line, 64 per batch, invalid UTF-8 answered with an error instead of stopping the server.
+- Randomised and mutated input tests for the settings loader, render log scanner, job history, flight recorder, crash report and MCP server.
+- [SECURITY.md](SECURITY.md) and a privacy section in the README.
+
+**Builds**
+- CI runs `cargo deny` and `cargo audit`; all actions pinned by commit SHA with Dependabot updates; job and step timeouts (the 1.0.0 release run hung on apt); Rust build cache.
+- Releases carry a signed build-provenance attestation for `tachyon.exe` and the zip, next to `SHA256SUMS.txt`.
+- winget and Scoop manifests in `packaging/` (not submitted yet).
+
 ## v1.0.0
 
 Tachyon 1.0 is the first release. It supersedes the 5.x preview builds: those numbers were development iterations, and versioning restarts here. Everything from the previews is in, plus four things that explain what the GPU is doing, worked out from the readings Tachyon already takes (no extra polling, nothing leaves the PC).

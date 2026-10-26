@@ -8,6 +8,7 @@ Thanks for helping. A few ground rules keep Tachyon small and trustworthy.
 - **Readable.** Text colours must keep WCAG 4.5:1 on the glass and solid cards (`cargo test` checks `theme.rs`); labels stay at 12 px or more.
 - **Privacy by default.** Show file names, not full paths. Anything more revealing (like command lines) must be opt-in in the toml.
 - **Insights ride on existing samples.** The explainer, forecast, recorder and history get the sample the monitor just took; don't add polling or threads for them. Thresholds and hysteresis need a synthetic test (see `src/explain.rs`, `src/forecast.rs`).
+- **Hostile input.** Anything read from disk or stdin is capped in size and must not panic: add its parser to `tests/robustness_test.rs`. No `unwrap()` on run-time paths.
 - **Graceful degradation.** Every NVML call may be missing or return NOT_SUPPORTED; show "N/A" and keep going.
 
 ## Workflow
@@ -23,6 +24,7 @@ Thanks for helping. A few ground rules keep Tachyon small and trustworthy.
    - put static (not variable) TrueType fonts in the prefix's `windows/Fonts`, or wine's DirectWrite picks synthetic oblique faces;
    - 1.0 views: `tests/shots_v1.sh crash|bottleneck|forecast|history` (the fake driver reads a scenario from `C:\rmfake\scenario.txt`: decode, ramp, idle, busy or hot); `TACHYON_DEMO_DIR=<dir> cargo test --release --test demo_data -- --ignored` seeds an unclean session and three jobs; `TACHYON_VIEW=report|history` opens a view at start; `TACHYON_DATA_DIR=<dir>` moves the data folder;
    - `python3 tests/mcp_client.py <dir with tachyon.exe> off|standalone|tachyon` drives `tachyon.exe mcp` like an MCP client and checks every tool;
+   - hardening checks: `tests/hardening.sh first|corrupt|panic|single|tdr|all` (first start, damaged settings, crash log, second instance, driver reset; the fake driver's `lost` and `nodriver` scenarios); `tests/shots_settings.sh shots|clicks|keys` for the Settings page with the mouse and the keyboard; `TACHYON_FUZZ_ROUNDS=20000 cargo test --release --test robustness_test` for longer fuzz runs;
    - `TACHYON_DUMP_DIR=<dir>` writes the raw premultiplied BGRA frames, for previews; `cargo run --example hex_dump` renders Hex frames without Windows.
 
 ## Reporting bugs

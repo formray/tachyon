@@ -160,10 +160,10 @@ top of the panel. Five tabs:
 
 | Tab | What you can change |
 |---|---|
-| General | Display mode (island, Hex, panel); whether Hex announces crash reports; how long Hex's bubble stays open (5–30 s or until clicked); refresh rate (0.25–2 s) |
+| General | Display mode (island, Hex, panel); whether Hex announces crash reports; how long Hex's bubble stays open (5–30 s or until clicked); refresh rate (0.25–2 s); *Start with Windows*; which GPU to show, when there is more than one |
 | Projects | Render folders to watch (up to 12): add with a folder picker, remove with × |
 | Alerts | Temperature amber and red; VRAM amber and red (GB); how far ahead the VRAM forecast warns (5–60 min, or off) |
-| Data | Flight recorder on/off and how many minutes it keeps; job history on/off; energy price and currency |
+| Data | Flight recorder on/off and how many minutes it keeps; job history on/off; energy price and currency; *Reset settings*; where the data lives and how to remove Tachyon |
 | AI agents | Agent API on/off with its live state, *Copy MCP config*, and what agents can and cannot do |
 
 Use the − and + buttons or the mouse wheel over a value. Each change is
@@ -172,18 +172,38 @@ runs; the flight recorder is the one setting that says *restart to apply*.
 The file is written to a temporary file first and then renamed, so a crash
 mid-save cannot leave half a file; the first change of each visit keeps the
 previous file as `tachyon.toml.bak`. Comments, unknown keys and anything the
-page does not show are kept. The page only edits `tachyon.toml`; it changes
-nothing in Windows. There is no *Start with Windows* switch yet: put a
-shortcut to `tachyon.exe` in `shell:startup`.
+page does not show are kept. Apart from `tachyon.toml`, the page changes one
+thing only when you ask: *Start with Windows* (off by default) puts a
+shortcut to this `tachyon.exe` in your Startup folder (`shell:startup`), and
+turning it off removes that shortcut. No registry keys, no admin rights, no
+scheduled tasks. *Reset settings* asks for a second click, keeps the old file
+as `tachyon.toml.bak` and keeps the window positions.
 
-On first start `tachyon.toml` is written next to the exe. Leave anything
-out and the default is used; positions and the mode are saved on exit
-without touching your comments.
+The page works from the keyboard: **Tab** and **Shift+Tab** move a focus
+ring between controls, **Space** or **Enter** presses, **←** and **→** change
+a value, a tab or a segment, **Ctrl+Tab** switches tabs and **Esc** goes back.
+**Ctrl+,** opens Settings, and **Shift+F10** or the menu key opens the
+right-click menu. Text colours keep at least 4.5:1 contrast on the glass
+(checked by `cargo test`).
+
+On first start `tachyon.toml` is written next to the exe with the defaults
+and the panel opens with a short hint; there are no personal paths in it and
+no render folders until you add one. If the exe sits in a folder you cannot
+write to, the file goes to `%LOCALAPPDATA%\Tachyon\tachyon.toml` instead.
+Leave anything out and the default is used; positions and the mode are saved
+on exit without touching your comments. If the file cannot be read (a typo,
+a wrong type, not UTF-8, larger than 1 MB), Tachyon keeps it as
+`tachyon.toml.corrupt-<date>-<time>`, starts with the defaults and says so in
+the panel. Starting `tachyon.exe` a second time with the same settings file
+brings the running one to the front instead of opening another.
+`TACHYON_CONFIG=<file>` and `TACHYON_DATA_DIR=<folder>` point a copy at its
+own settings and data, so two can run side by side.
 
 ```toml
 mode = "island"             # "island", "companion" (Hex) or "panel"; unset = from [window] compact
 glass = "auto"              # "tint" (works everywhere), "blur" (experimental) or "auto"
 poll_ms = 1000              # 250-2000
+gpu_index = 0               # which GPU, when there is more than one (Settings > General)
 pcie = true                 # PCIe RX/TX (about 20 ms of NVML wait per tick)
 process_refresh_secs = 4
 process_cmdline = false     # true = also show command lines (off for privacy)
@@ -224,14 +244,33 @@ A render machine example is in [`examples/tachyon_render.toml`](examples/tachyon
 `rig_monitor.toml` from the earlier name is read when there is no
 `tachyon.toml`.
 
-### Your data
+### Your data and privacy
 
-The flight recorder, the history and exports live in `%LOCALAPPDATA%\Tachyon`
-(`blackbox\`, `history\jobs.jsonl`, `exports\`), and nowhere else. Nothing
-leaves the PC: Tachyon has no network code. The recorder keeps process names
-(up to 24 characters), never paths or command lines; the history keeps job
-names as they appear in your render logs. Turn either off with `blackbox =
-false` or `history = false`, and delete the folder to remove everything.
+Tachyon has no network code: no telemetry, no update check, no crash upload,
+no accounts. It reads the NVIDIA driver, the process list, the render logs in
+the folders you add and (for the crash report) the Windows event log, and it
+writes only these:
+
+| Where | What |
+|---|---|
+| `tachyon.toml` next to the exe (or in `%LOCALAPPDATA%\Tachyon`) | your settings, with `.bak` and any `.corrupt-…` copies beside it |
+| `%LOCALAPPDATA%\Tachyon\blackbox\` | flight recorder: two fixed-size files of readings (about 340 KB) |
+| `%LOCALAPPDATA%\Tachyon\history\jobs.jsonl` | finished jobs (rotated at 2 MB, one older file kept) |
+| `%LOCALAPPDATA%\Tachyon\exports\` | only when you choose *Export flight recorder* |
+| `%LOCALAPPDATA%\Tachyon\logs\` | a short text file if Tachyon itself crashes: version, time, where in its code it stopped and the error message; no readings |
+| your Startup folder | `Tachyon.lnk`, only while *Start with Windows* is on |
+| shared memory `Local\TachyonAgentSnapshot` | live status for `tachyon.exe mcp`, only while the agent API is on; readable by your user account only |
+
+The recorder keeps process names (up to 24 characters), never paths or
+command lines (`process_cmdline = true` shows command lines in the panel,
+never stored); the history keeps job names as they appear in your render
+logs. Turn either off with `blackbox = false` or `history = false`.
+
+**To remove Tachyon:** turn off *Start with Windows* (or delete `Tachyon.lnk`
+from `shell:startup`), quit it, then delete `tachyon.exe`, its `tachyon.toml`
+and the `%LOCALAPPDATA%\Tachyon` folder. Nothing else is left behind.
+
+Security model and how to report a problem: [SECURITY.md](SECURITY.md).
 
 ### AI agents (MCP)
 
@@ -399,7 +438,18 @@ under wine.
 - **Bubble:** Esc does not close it (it never takes keyboard focus): click
   Hex or the bubble, or wait 8 s (change it in Settings). It opens with a fade and a slide, not a
   scale.
-- The **fullscreen pause** has not been tested on Windows.
+- The **fullscreen pause** (Hex, island and panel stop drawing while a game or
+  video fills the monitor; readings continue) has not been tested on Windows.
+- **Monitor changes:** a window left on a monitor that was unplugged comes
+  back to the nearest screen; tested by unit tests only (wine cannot unplug a
+  monitor).
+- **Laptops with switchable graphics (Optimus):** reading the driver every
+  second can keep the NVIDIA GPU awake on battery. Set `poll_ms = 2000` or quit
+  Tachyon on battery; an automatic pause is not in 1.0.1.
+- **English only** for now.
+- **Unsigned exe:** Windows SmartScreen may say *Windows protected your PC*
+  on first start; choose *More info → Run anyway*, after checking the file
+  against `SHA256SUMS.txt` or `gh attestation verify tachyon.exe --repo formray/tachyon`.
 - **Click-through:** halo pixels with alpha of 96/255 or more take clicks;
   the shadow passes them through (`HTTRANSPARENT`).
 - **No tray icon and no taskbar button:** use the island, Hex or the
