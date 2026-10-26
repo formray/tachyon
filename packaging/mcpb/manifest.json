@@ -34,9 +34,9 @@
     { "name": "get_bottleneck", "description": "Why is it slow? The current bottleneck in one sentence with a confidence, the process involved and the readings behind it." },
     { "name": "get_vram_forecast", "description": "VRAM use and trend: when it will be full at the current rate, the fastest-growing process and idle apps holding VRAM." },
     { "name": "get_processes", "description": "Processes using the GPU with their category, VRAM and engine use." },
-    { "name": "get_blackbox", "description": "The last minutes from Tachyon's flight recorder (peaks, per-minute timeline, optional samples) and the last crash report." },
+    { "name": "get_blackbox", "description": "Tachyon's flight recorder (peaks, per-minute timeline, a plain summary, optional samples): the last minutes, any window still on disk (since/until) or the previous session, and the last crash report." },
     { "name": "get_history", "description": "Recent finished render jobs and GPU-busy sessions: duration, GPU load, fps, energy, peak VRAM, temperature and throttling." },
-    { "name": "diagnose_crash", "description": "Probable causes of the last unexpected restart or GPU driver failure, ranked with a rough percentage, with evidence and advice. Read-only estimates." },
+    { "name": "diagnose_crash", "description": "Probable causes of the last (or a given) unexpected restart or GPU driver failure, ranked with a rough percentage, with evidence, the flight recorder's readings before the stop and advice. Read-only estimates." },
     { "name": "preflight", "description": "Pre-render check: predicted peak VRAM and duration of a render job from similar past runs against the VRAM free now; fits, tight, wont_fit or unknown." },
     { "name": "compare_last_run", "description": "Compares the latest job (optionally filtered by name) with the previous run of the same job." }
   ],

@@ -26,6 +26,11 @@ pub const LIVE_KERNEL: &str = "LiveKernelEvent";
 /// An application crash (Application log, event 1000); `code` is the executable name.
 pub const APP_ERROR: &str = "Application Error";
 const WER_APP: &str = "Windows Error Reporting";
+/// Kernel-General: 1 = the system time was changed (`code`: seconds, new minus old), 12 = the
+/// operating system started, 13 = it shut down.
+pub const KERNEL_GENERAL: &str = "Microsoft-Windows-Kernel-General";
+/// Clock changes smaller than this are ordinary time synchronisation, not kept.
+const CLOCK_CHANGE_MIN_S: i64 = 60;
 
 impl SysEvent {
     /// Plain words for the report.
@@ -40,7 +45,17 @@ impl SysEvent {
                 "Windows restarted without shutting down cleanly (Kernel-Power 41{code}): power loss, a hard freeze or a forced restart."
             ),
             (WER_SYSTEM | "BugCheck", 1001) => format!("Windows stopped with a blue screen and restarted (bug check{code})."),
-            ("EventLog", 6008) => "Windows noted that the previous shutdown was unexpected (EventLog 6008).".into(),
+            ("EventLog", 6008) => match self.last_alive_ms() {
+                Some(t) => format!(
+                    "Windows noted that the previous shutdown was unexpected (EventLog 6008); its last sign of life was at {}.",
+                    SysEvent { t_ms: t, ..self.clone() }.local().format("%H:%M:%S")
+                ),
+                None => "Windows noted that the previous shutdown was unexpected (EventLog 6008).".into(),
+            },
+            (KERNEL_GENERAL, 1) => match self.clock_change_s() {
+                Some(d) => format!("The system clock was changed by {} (Kernel-General 1).", signed_duration(d)),
+                None => "The system clock was changed (Kernel-General 1).".into(),
+            },
             (WHEA, 18) => "The hardware reported a fatal error (WHEA-Logger 18): often the CPU, memory or an unstable overclock.".into(),
             (WHEA, 17) => "The PCIe link reported a corrected error (WHEA-Logger 17).".into(),
             (WHEA, 19) => "The CPU reported a corrected error (WHEA-Logger 19).".into(),
@@ -66,6 +81,30 @@ impl SysEvent {
         matches!((self.provider.as_str(), self.id), (KERNEL_POWER, 41) | (WER_SYSTEM | "BugCheck", 1001) | ("EventLog", 6008))
     }
 
+    /// A clock change: seconds the clock moved (new minus old), for Kernel-General 1.
+    pub fn clock_change_s(&self) -> Option<i64> {
+        if (self.provider.as_str(), self.id) != (KERNEL_GENERAL, 1) {
+            return None;
+        }
+        self.code.as_deref()?.parse().ok()
+    }
+
+    /// EventLog 6008: when Windows last noted the PC was running, before the unexpected stop.
+    pub fn last_alive_ms(&self) -> Option<i64> {
+        if (self.provider.as_str(), self.id) != ("EventLog", 6008) {
+            return None;
+        }
+        chrono::DateTime::parse_from_rfc3339(self.code.as_deref()?).ok().map(|d| d.timestamp_millis())
+    }
+
+    /// Logged while Windows starts (the boot sequence), not by the session before it.
+    pub fn is_boot_marker(&self) -> bool {
+        matches!(
+            (self.provider.as_str(), self.id),
+            (KERNEL_GENERAL, 12) | (KERNEL_GENERAL, 20) | ("EventLog", 6005) | ("EventLog", 6009) | ("EventLog", 6008) | (KERNEL_POWER, 41)
+        ) || self.provider == "Microsoft-Windows-Kernel-Boot"
+    }
+
     /// True for GPU driver trouble (TDR, nvlddmkm).
     pub fn is_gpu(&self) -> bool {
         self.provider == "nvlddmkm"
@@ -88,6 +127,37 @@ impl SysEvent {
     }
 }
 
+/// "+1 h 0 min", "-5 min", "+45 s".
+pub fn signed_duration(secs: i64) -> String {
+    let sign = if secs < 0 { "-" } else { "+" };
+    let a = secs.unsigned_abs();
+    match a {
+        0..60 => format!("{sign}{a} s"),
+        60..3600 => format!("{sign}{} min", (a + 30) / 60),
+        _ => format!("{sign}{} h {} min", a / 3600, (a % 3600 + 30) / 60),
+    }
+}
+
+/// SYSTEMTIME (16 bytes, little-endian words) as Unix ms, read as UTC.
+fn systemtime_ms(b: &[u8]) -> Option<i64> {
+    let w = |i: usize| u16::from_le_bytes([b[2 * i], b[2 * i + 1]]) as u32;
+    if b.len() < 16 {
+        return None;
+    }
+    let d = chrono::NaiveDate::from_ymd_opt(w(0) as i32, w(1), w(3))?;
+    let t = d.and_hms_milli_opt(w(4), w(5), w(6), w(7))?;
+    Some(t.and_utc().timestamp_millis())
+}
+
+/// The `<Binary>` hex of an event as bytes (at most 256).
+fn binary(xml: &str) -> Option<Vec<u8>> {
+    let hex = text(xml, "Binary")?;
+    if hex.len() % 2 != 0 || hex.len() > 512 {
+        return None;
+    }
+    (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok()).collect()
+}
+
 fn iso(ms: i64) -> String {
     chrono::DateTime::from_timestamp_millis(ms).unwrap_or_default().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
 }
@@ -97,7 +167,7 @@ pub fn xpath(from_ms: i64, to_ms: i64) -> String {
     format!(
         "*[System[((Provider[@Name='{KERNEL_POWER}'] and EventID=41) or (Provider[@Name='{WER_SYSTEM}'] and EventID=1001) or \
          (Provider[@Name='EventLog'] and EventID=6008) or Provider[@Name='{WHEA}'] or Provider[@Name='nvlddmkm'] or \
-         (Provider[@Name='Display'] and EventID=4101)) and TimeCreated[@SystemTime>='{}' and @SystemTime<='{}']]]",
+         (Provider[@Name='Display'] and EventID=4101) or (Provider[@Name='{KERNEL_GENERAL}'] and EventID=1)) and TimeCreated[@SystemTime>='{}' and @SystemTime<='{}']]]",
         iso(from_ms),
         iso(to_ms)
     )
@@ -216,6 +286,20 @@ pub fn parse_event_xml(xml: &str) -> Option<SysEvent> {
             Err(_) => c,
         }),
         (WER_SYSTEM | "BugCheck", 1001) => data(xml, "param1").map(|p| p.split_whitespace().next().unwrap_or("").to_string()),
+        // the binary data holds the last-alive time twice: local, then UTC
+        ("EventLog", 6008) => binary(xml)
+            .filter(|b| b.len() >= 32)
+            .and_then(|b| systemtime_ms(&b[16..32]))
+            .and_then(chrono::DateTime::from_timestamp_millis)
+            .map(|d| d.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()),
+        (KERNEL_GENERAL, 1) => {
+            let t = |k: &str| data(xml, k).and_then(|v| chrono::DateTime::parse_from_rfc3339(&v).ok()).map(|d| d.timestamp_millis());
+            let d = ((t("NewTime")? - t("OldTime")?) as f64 / 1000.0).round() as i64;
+            if d.abs() < CLOCK_CHANGE_MIN_S {
+                return None;
+            }
+            Some(d.to_string())
+        }
         _ => None,
     };
     Some(SysEvent { t_ms, provider, id, level, code })
@@ -233,6 +317,13 @@ pub fn query(from_ms: i64, to_ms: i64, max: usize) -> Result<Vec<SysEvent>, Stri
         out.drain(..skip);
     }
     Ok(out)
+}
+
+/// The newest System log entries of any kind up to `to_ms` (at most `max`, oldest first; the six
+/// hours before), to find what Windows logged last before an unexpected stop.
+pub fn last_before(to_ms: i64, max: usize) -> Result<Vec<SysEvent>, String> {
+    let q = format!("*[System[TimeCreated[@SystemTime>='{}' and @SystemTime<='{}']]]", iso(to_ms - 6 * 3_600_000), iso(to_ms));
+    query_channel("System", &q, max)
 }
 
 #[cfg(windows)]
@@ -374,10 +465,35 @@ mod tests {
         assert_eq!(q.matches('[').count(), q.matches(']').count());
     }
 
+    const E6008: &str = r#"<Event><System><Provider Name='EventLog'/><EventID Qualifiers='32768'>6008</EventID><Level>2</Level><TimeCreated SystemTime='2026-10-26T18:12:41.0000000Z'/></System><EventData><Data>18:09:33</Data><Data>26/10/2026</Data><Data></Data><Data></Data><Data>1234</Data><Data></Data><Data></Data><Binary>EA070A0001001A00120009002100F401EA070A0001001A00110009002100F401</Binary></EventData></Event>"#;
+    const KG1: &str = r#"<Event><System><Provider Name='Microsoft-Windows-Kernel-General' Guid='{a68ca8b7-004f-d7b6-a698-07e2de0f1f5d}'/><EventID>1</EventID><Level>4</Level><TimeCreated SystemTime='2026-10-26T18:20:00.0000000Z'/></System><EventData><Data Name='NewTime'>2026-10-26T17:20:00.5000000Z</Data><Data Name='OldTime'>2026-10-26T18:20:00.4000000Z</Data><Data Name='Reason'>1</Data></EventData></Event>"#;
+
+    /// 26 Oct 2026: power cut at 18:09 (Rome, UTC+1), the clock after the BIOS reset ran 1 h fast.
+    #[test]
+    fn last_alive_time_and_clock_changes() {
+        let e = parse_event_xml(E6008).unwrap();
+        assert!(e.is_restart() && e.is_boot_marker());
+        assert_eq!(e.code.as_deref(), Some("2026-10-26T17:09:33.500Z"));
+        assert_eq!(e.last_alive_ms(), Some(chrono::DateTime::parse_from_rfc3339("2026-10-26T17:09:33.5Z").unwrap().timestamp_millis()));
+        assert!(e.describe().contains("last sign of life was at"), "{}", e.describe());
+        let k = parse_event_xml(KG1).unwrap();
+        assert_eq!(k.clock_change_s(), Some(-3600));
+        assert_eq!(k.describe(), "The system clock was changed by -1 h 0 min (Kernel-General 1).");
+        assert!(!k.is_restart() && !k.is_gpu());
+        // ordinary time sync (a fraction of a second) is not kept
+        assert!(parse_event_xml(&KG1.replace("2026-10-26T17:20:00.5", "2026-10-26T18:20:00.9")).is_none());
+        // a damaged binary gives no time, the event stays
+        let bad = parse_event_xml(&E6008.replace("EA070A00", "ZZ")).unwrap();
+        assert_eq!(bad.last_alive_ms(), None);
+        assert_eq!(signed_duration(45), "+45 s");
+        assert_eq!(signed_duration(-300), "-5 min");
+        assert_eq!(signed_duration(3600 + 125), "+1 h 2 min");
+    }
+
     #[test]
     fn query_text_covers_the_providers_and_window() {
         let q = xpath(0, 60_000);
-        for p in [KERNEL_POWER, WER_SYSTEM, WHEA, "nvlddmkm", "Display", "EventLog"] {
+        for p in [KERNEL_POWER, WER_SYSTEM, WHEA, "nvlddmkm", "Display", "EventLog", KERNEL_GENERAL] {
             assert!(q.contains(&format!("@Name='{p}'")), "{p}");
         }
         assert!(q.contains("@SystemTime>='1970-01-01T00:00:00.000Z' and @SystemTime<='1970-01-01T00:01:00.000Z'"));

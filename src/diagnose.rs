@@ -22,20 +22,24 @@ pub enum Suspect {
     Heat,
     DriverTimeout,
     Application,
+    /// The whole PC lost power or was switched off: the wall, the PSU switch, a manual power-off
+    /// or a reset from the motherboard, not something the GPU did.
+    PowerCut,
 }
 
-const ALL: [Suspect; 6] =
-    [Suspect::Ram, Suspect::GpuOverclock, Suspect::Power, Suspect::Heat, Suspect::DriverTimeout, Suspect::Application];
+const ALL: [Suspect; 7] =
+    [Suspect::Ram, Suspect::GpuOverclock, Suspect::Power, Suspect::Heat, Suspect::DriverTimeout, Suspect::Application, Suspect::PowerCut];
 
 impl Suspect {
     pub fn label(self) -> &'static str {
         match self {
             Suspect::Ram => "Unstable RAM or memory overclock (EXPO/XMP)",
             Suspect::GpuOverclock => "GPU core or memory overclock",
-            Suspect::Power => "Power delivery or the power supply",
+            Suspect::Power => "GPU power delivery or the power supply",
             Suspect::Heat => "Overheating",
             Suspect::DriverTimeout => "GPU driver timeout (TDR) from a long GPU task",
             Suspect::Application => "A bug in the application",
+            Suspect::PowerCut => "A whole-system power loss or a manual power-off",
         }
     }
     /// Short label for the panel and Hex.
@@ -47,6 +51,7 @@ impl Suspect {
             Suspect::Heat => "overheating",
             Suspect::DriverTimeout => "driver timeout (TDR)",
             Suspect::Application => "application bug",
+            Suspect::PowerCut => "power cut / switched off",
         }
     }
     fn idx(self) -> usize {
@@ -61,6 +66,14 @@ pub struct Context {
     /// The overclock reading was taken after the restart, not before the crash.
     pub oc_after: bool,
     pub ram: Option<RamSpeed>,
+    /// Minutes the clock seemed to jump at the restart (positive: the clock after the restart ran
+    /// ahead of the real time), from the recorder, the Event Log or a Windows clock correction.
+    pub clock_shift_min: Option<i64>,
+    /// How long the BIOS/UEFI took at the last start (ms, Windows' "Last BIOS time").
+    pub firmware_boot_ms: Option<u32>,
+    /// The restart diagnosed is the current boot, so the RAM speed and BIOS time read now are
+    /// the ones right after it.
+    pub just_after: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -83,6 +96,9 @@ pub struct Diagnosis {
     /// What looked normal (rules a cause down).
     pub normal: Vec<String>,
     pub note: String,
+    /// Other things worth knowing, not causes (e.g. the BIOS settings were reset).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hints: Vec<String>,
 }
 
 impl Diagnosis {
@@ -109,8 +125,8 @@ const TOP_CAP: u8 = 85;
 
 #[derive(Default)]
 struct Board {
-    s: [f32; 6],
-    ev: [Vec<String>; 6],
+    s: [f32; 7],
+    ev: [Vec<String>; 7],
 }
 
 impl Board {
@@ -167,6 +183,23 @@ fn repeat_factor(n: usize) -> f32 {
 
 fn plural(n: usize, one: &str) -> String {
     if n == 1 { format!("1 {one}") } else { format!("{n} {one}s") }
+}
+
+/// What the recorder saw in the last minute, when the GPU was idle: (peak load %, peak W,
+/// limit W, peak °C). Idle = at most 15 % load and a quarter of the power limit (80 W without one).
+pub fn idle_before(peaks: &Peaks, last_minute: &[Sample]) -> Option<(u8, f32, Option<f32>, Option<u8>)> {
+    let p = if last_minute.is_empty() { peaks.clone() } else { crate::report::peaks(last_minute) };
+    let u = p.gpu_util?;
+    let w = p.power_w?;
+    let cap = p.power_limit_w.filter(|l| *l > 0.0).map_or(80.0, |l| l * 0.25);
+    (u <= 15 && w <= cap).then_some((u, w, p.power_limit_w, p.temp))
+}
+
+fn idle_text(i: (u8, f32, Option<f32>, Option<u8>)) -> String {
+    let (u, w, l, t) = i;
+    let lim = l.map(|l| format!(" of its {l:.0} W limit")).unwrap_or_default();
+    let temp = t.map(|t| format!(", {t} °C")).unwrap_or_default();
+    format!("GPU at most {u}% busy, {w:.0} W{lim}{temp}")
 }
 
 /// Rank the probable causes. `last_minute` are the samples just before the stop (may be empty
@@ -226,10 +259,37 @@ pub fn diagnose(
     // --- power loss or a hard freeze: Kernel-Power 41 without any bug check code
     let kp41 = count(&|e| e.provider == KERNEL_POWER && e.id == 41);
     let hard_off = kp41 > 0 && codes.is_empty();
+    let idle = idle_before(peaks, last_minute);
     if hard_off {
-        b.add(Suspect::Power, 3.0, "Windows lost power or froze with no blue screen (Kernel-Power 41, code 0)");
-        b.add(Suspect::Ram, 1.0, "a hard freeze can also be unstable RAM");
-        b.add(Suspect::Heat, 0.5, "");
+        match idle {
+            // the GPU was resting: it did not overload the PSU; the whole PC lost power or was switched off
+            Some(i) => {
+                let it = idle_text(i);
+                b.add(
+                    Suspect::PowerCut,
+                    3.0,
+                    &format!("Windows went off with no blue screen (Kernel-Power 41, code 0) while the PC was idle ({it})"),
+                );
+                b.add(
+                    Suspect::Power,
+                    1.0,
+                    &format!(
+                        "a power-off without a blue screen can be the PSU, but the GPU drew only {:.0} W, far from a load that trips it",
+                        i.1
+                    ),
+                );
+                b.add(Suspect::Ram, 0.5, "a hard freeze can also be unstable RAM, but it is rare at idle");
+                normal.push(format!("The GPU was idle just before the stop ({it})."));
+            }
+            None => {
+                b.add(Suspect::Power, 3.0, "Windows lost power or froze with no blue screen (Kernel-Power 41, code 0)");
+                b.add(Suspect::Ram, 1.0, "a hard freeze can also be unstable RAM");
+                b.add(Suspect::Heat, 0.5, "");
+                if last_minute.is_empty() && peaks.gpu_util.is_none() {
+                    b.add(Suspect::PowerCut, 1.0, "with no blue screen, the PC may also have lost mains power or been switched off");
+                }
+            }
+        }
     }
 
     // --- WHEA hardware errors
@@ -417,6 +477,8 @@ pub fn diagnose(
                 }
                 None
             }
+            // slower than standard: no RAM overclock now (the BIOS hint below says why)
+            RamState::BelowStandard => None,
         };
         if let Some((w, wm, ev)) = fast {
             b.add(Suspect::Ram, w, &ev);
@@ -435,9 +497,53 @@ pub fn diagnose(
     }
 
     // --- nothing logged at all
-    if cause == Cause::Restart && events_readable && events.is_empty() {
-        b.add(Suspect::Power, 1.5, "no blue screen or driver error was logged: the PC just went off");
+    if cause == Cause::Restart && events_readable && events.iter().all(|e| e.clock_change_s().is_some()) {
+        let who = if idle.is_some() { Suspect::PowerCut } else { Suspect::Power };
+        b.add(who, 1.5, "no blue screen or driver error was logged: the PC just went off");
         b.add(Suspect::Ram, 0.5, "");
+    }
+
+    // --- the BIOS settings were reset (RAM below its standard speed, the clock jumped, a slow BIOS start)
+    let mut hints = vec![];
+    let mut signs = vec![];
+    if let Some(r) = ctx.ram.as_ref().filter(|r| r.state() == RamState::BelowStandard) {
+        let kit = r.kit_mts().map(|k| format!(" and the kit's EXPO/XMP {k}")).unwrap_or_default();
+        signs.push(format!(
+            "the RAM runs at {} MT/s now, below its {} MT/s standard{kit}",
+            r.configured_mts.unwrap_or(0),
+            r.rated_mts.unwrap_or(0)
+        ));
+    }
+    // Windows correcting its clock by 30 min or more after the restart: it had run ahead (or behind) by that much
+    let corrected = events.iter().filter_map(|e| e.clock_change_s()).filter(|d| d.abs() >= 1800).max_by_key(|d| d.abs()).map(|d| -d / 60);
+    if let Some(m) = ctx.clock_shift_min.or(corrected).filter(|m| m.abs() >= 30) {
+        let h = (m.abs() as f32 / 60.0 * 2.0).round() / 2.0;
+        let dir = if m > 0 { "ahead" } else { "behind" };
+        let amount = if (h - h.round()).abs() < 0.01 { format!("{h:.0} h") } else { format!("{h:.1} h") };
+        signs.push(format!("the clock after the restart was about {amount} {dir}"));
+    }
+    if ctx.just_after
+        && let Some(f) = ctx.firmware_boot_ms.filter(|f| *f >= 45_000)
+    {
+        signs.push(format!("the BIOS took {} s to start (memory training after a reset takes longer)", f / 1000));
+    }
+    let ram_reset = ctx.ram.as_ref().is_some_and(|r| r.state() == RamState::BelowStandard);
+    if !signs.is_empty() && (ram_reset || signs.len() >= 2 || (ctx.just_after && cause == Cause::Restart)) {
+        let when = if ctx.just_after && cause == Cause::Restart { " at this restart" } else { "" };
+        let what = if ram_reset { "BIOS likely reset to safe defaults (EXPO/XMP off)" } else { "BIOS settings possibly reset" };
+        hints.push(format!(
+            "{what}{when}: {}. Check the BIOS: turn EXPO/XMP back on if you use it, and the date and time.",
+            signs.join("; ")
+        ));
+        if hard_off && ctx.just_after {
+            b.add(
+                Suspect::PowerCut,
+                0.5,
+                "the BIOS settings were reset at the same time, as after a power cut at the board, a CMOS clear or a BIOS FlashBack reset",
+            );
+        }
+    } else if !signs.is_empty() {
+        hints.push(format!("Worth knowing: {}.", signs.join("; ")));
     }
 
     let total: f32 = b.s.iter().sum();
@@ -456,6 +562,7 @@ pub fn diagnose(
             sentence: "Not enough evidence for a probable cause.".into(),
             normal,
             note,
+            hints,
         });
     }
     let reserve = RESERVE + if events_readable { 0.0 } else { 2.0 };
@@ -494,7 +601,14 @@ pub fn diagnose(
         ),
         _ => "Not enough evidence for a probable cause.".into(),
     };
-    Some(Diagnosis { confidence: if causes.is_empty() { "unclear".into() } else { confidence.into() }, causes, sentence, normal, note })
+    Some(Diagnosis {
+        confidence: if causes.is_empty() { "unclear".into() } else { confidence.into() },
+        causes,
+        sentence,
+        normal,
+        note,
+        hints,
+    })
 }
 
 fn lower_first(s: &str) -> String {
@@ -525,6 +639,9 @@ fn advice(s: Suspect, ctx: &Context, peaks: &Peaks, crashed: &[String]) -> Strin
                     c.saturating_sub(400)
                 ),
                 RamState::Standard => format!("The RAM runs at a standard speed ({c} MT/s), so run {TEST} to check the modules themselves."),
+                RamState::BelowStandard => format!(
+                    "The RAM runs at {c} MT/s now, below its standard: EXPO/XMP is off, which is the safe setting. Run {TEST} if crashes come back; turn EXPO back on in the BIOS when you want the speed again."
+                ),
             }
         }
 
@@ -537,6 +654,7 @@ fn advice(s: Suspect, ctx: &Context, peaks: &Peaks, crashed: &[String]) -> Strin
             peaks.temp.map(|t| format!("; the GPU reached {t} °C")).unwrap_or_default()
         ),
         Suspect::DriverTimeout => "One GPU task ran longer than Windows allows (2 s). Smaller batches or tiles usually fix it; if it happens in many apps, reinstall the driver cleanly.".into(),
+        Suspect::PowerCut => "If nobody switched it off: check the wall socket, the power strip and the PSU's switch and cable, and what changed at that moment (something plugged in or unplugged, e.g. a USB stick in the rear BIOS FlashBack port, or the power or reset button). If it happens again at idle with nothing touched, have the PSU tested.".into(),
         Suspect::Application => match crashed.first() {
             Some(a) => format!("The crash came from {a}: update it and its GPU libraries (CUDA, PyTorch and so on) and check its log."),
             None => "Update the application and its GPU libraries and check its log.".into(),
@@ -596,7 +714,7 @@ mod tests {
     fn expo_kit_at_or_below_its_rating_is_a_profile_not_an_overclock() {
         let events = vec![ev(-300, "nvlddmkm", 153, None), ev(60, KERNEL_POWER, 41, Some("0x0000001A"))];
         let kit = |conf| RamSpeed { modules: 4, part: Some("CMK32GX5M2B6000Z30".into()), ..ram(4800, conf) };
-        let ctx = Context { oc: None, oc_after: true, ram: Some(kit(5600)) };
+        let ctx = Context { oc: None, oc_after: true, ram: Some(kit(5600)), ..Default::default() };
         let d = diagnose(Cause::Restart, &events, true, &peaks(92, 66, 264.0), &[], None, &ctx).unwrap();
         let r = d.causes.iter().find(|c| c.suspect == Suspect::Ram).expect("ram");
         let ev = r.evidence.join(" | ");
@@ -623,7 +741,12 @@ mod tests {
             ev(60, KERNEL_POWER, 41, Some("0x0000001A")),
             ev(70, WER_SYSTEM, 1001, Some("0x0000001a")),
         ];
-        let ctx = Context { oc: Some(OcInfo { mem_offset_mhz: Some(1000), ..stock() }), oc_after: false, ram: Some(ram(4800, 6000)) };
+        let ctx = Context {
+            oc: Some(OcInfo { mem_offset_mhz: Some(1000), ..stock() }),
+            oc_after: false,
+            ram: Some(ram(4800, 6000)),
+            ..Default::default()
+        };
         let d = diagnose(Cause::Restart, &events, true, &peaks(92, 66, 264.0), &[], Some(&python()), &ctx).unwrap();
         assert_eq!(d.causes[0].suspect, Suspect::Ram, "{d:#?}");
         assert_eq!(d.causes[1].suspect, Suspect::GpuOverclock, "{d:#?}");
@@ -641,7 +764,7 @@ mod tests {
         assert!(d.causes.iter().map(|c| c.percent as u32).sum::<u32>() <= 100);
         // the same events with RAM back at 5600 and the GPU at stock: RAM is still the top suspect
         // (0x1A) but with less weight
-        let ctx2 = Context { oc: Some(stock()), oc_after: true, ram: Some(ram(4800, 5600)) };
+        let ctx2 = Context { oc: Some(stock()), oc_after: true, ram: Some(ram(4800, 5600)), ..Default::default() };
         let d2 = diagnose(Cause::Restart, &events, true, &peaks(92, 66, 264.0), &[], Some(&python()), &ctx2).unwrap();
         assert!(pct(&d2, Suspect::GpuOverclock) < pct(&d, Suspect::GpuOverclock));
         assert!(d2.normal.iter().any(|n| n.contains("stock settings") && n.contains("after the restart")));
@@ -656,6 +779,77 @@ mod tests {
         assert_eq!(d.confidence, "likely");
         assert!(d.causes[0].advice.contains("power cables"));
         assert!(d.normal.iter().any(|n| n.contains("standard speed")));
+    }
+
+    fn idle_minute() -> Vec<Sample> {
+        (0..60)
+            .map(|i| Sample {
+                t_ms: T - 60_000 + i * 1000,
+                util: Some(if i % 20 == 0 { 3 } else { 0 }),
+                temp: Some(32 + (i % 2) as u8),
+                power_w: Some(14.0 + (i % 10) as f32),
+                power_limit_w: Some(360.0),
+                throttle: Some(0x400),
+                ..Default::default()
+            })
+            .collect()
+    }
+
+    /// 26 Oct 2026: the PC went off at idle (a USB stick in the BIOS FlashBack port); Kernel-Power
+    /// 41 with code 0, no WHEA, no dump; the BIOS came back on its defaults (RAM 3600, clock +1 h).
+    #[test]
+    fn idle_power_loss_points_to_a_power_cut_not_the_gpu() {
+        let events = vec![ev(190, KERNEL_POWER, 41, None), ev(191, "EventLog", 6008, None)];
+        let kit = RamSpeed { modules: 4, part: Some("CMK32GX5M2B6000Z30".into()), ..ram(4800, 3600) };
+        let ctx = Context {
+            oc: Some(stock()),
+            oc_after: true,
+            ram: Some(kit),
+            clock_shift_min: Some(60),
+            firmware_boot_ms: Some(52_000),
+            just_after: true,
+        };
+        let lm = idle_minute();
+        let p = crate::report::peaks(&lm);
+        let d = diagnose(Cause::Restart, &events, true, &p, &lm, None, &ctx).unwrap();
+        assert_eq!(d.causes[0].suspect, Suspect::PowerCut, "{d:#?}");
+        assert!(d.causes[0].evidence[0].contains("while the PC was idle (GPU at most 3% busy, 23 W of its 360 W limit, 33 °C)"), "{d:#?}");
+        assert!(d.causes[0].advice.contains("BIOS FlashBack port"));
+        assert!(pct(&d, Suspect::Power) <= 20 && pct(&d, Suspect::Power) < d.causes[0].percent, "{d:#?}");
+        assert!(
+            d.causes.iter().find(|c| c.suspect == Suspect::Power).is_none_or(|c| c.evidence.iter().any(|e| e.contains("drew only 23 W")))
+        );
+        assert!(d.normal.iter().any(|n| n.starts_with("The GPU was idle just before the stop")), "{:?}", d.normal);
+        let h = d.hints.join(" | ");
+        assert!(h.starts_with("BIOS likely reset to safe defaults (EXPO/XMP off) at this restart: the RAM runs at 3600 MT/s now, below its 4800 MT/s standard and the kit's EXPO/XMP 6000"), "{h}");
+        assert!(h.contains("the clock after the restart was about 1 h ahead") && h.contains("the BIOS took 52 s"), "{h}");
+        assert!(!d.causes.iter().any(|c| c.suspect == Suspect::Ram && c.evidence.iter().any(|e| e.contains("EXPO/XMP profile"))));
+        // the same stop at full GPU load still points at the PSU / power delivery
+        let mut busy = idle_minute();
+        for s in &mut busy {
+            s.util = Some(99);
+            s.power_w = Some(352.0);
+        }
+        let d2 = diagnose(Cause::Restart, &events, true, &crate::report::peaks(&busy), &busy, None, &ctx).unwrap();
+        assert_eq!(d2.causes[0].suspect, Suspect::Power, "{d2:#?}");
+        assert!(pct(&d2, Suspect::PowerCut) < 10, "{d2:#?}");
+        // a Windows clock correction after the restart counts as the clock jump too
+        let mut ev2 = events.clone();
+        ev2.push(SysEvent { code: Some("-3600".into()), ..ev(900, crate::events::KERNEL_GENERAL, 1, None) });
+        let ctx3 = Context { clock_shift_min: None, ram: Some(ram(4800, 4800)), ..ctx.clone() };
+        let d3 = diagnose(Cause::Restart, &ev2, true, &p, &lm, None, &ctx3).unwrap();
+        assert!(
+            d3.hints.iter().any(|h| h.contains("about 1 h ahead") && h.starts_with("BIOS settings possibly reset at this restart")),
+            "{:?}",
+            d3.hints
+        );
+        // RAM below its standard on an older crash: noted, without "at this restart"
+        let ctx4 = Context { just_after: false, clock_shift_min: None, ..ctx };
+        let d4 = diagnose(Cause::Restart, &[ev(30, KERNEL_POWER, 41, Some("0x0000001A"))], true, &peaks(92, 66, 264.0), &[], None, &ctx4)
+            .unwrap();
+        assert!(d4.hints[0].starts_with("BIOS likely reset to safe defaults (EXPO/XMP off): the RAM runs at 3600"), "{:?}", d4.hints);
+        let r = d4.causes.iter().find(|c| c.suspect == Suspect::Ram).unwrap();
+        assert!(r.advice.contains("EXPO/XMP is off, which is the safe setting"), "{}", r.advice);
     }
 
     #[test]

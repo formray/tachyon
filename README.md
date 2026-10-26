@@ -50,7 +50,11 @@ New in 1.1 (unreleased):
   cause lists its evidence and one piece of advice; it says *likely* or *possibly*, never
   certain, and changes no settings. In the report view (*Evidence ›*), in Hex's
   announcement and in the `diagnose_crash` tool, which can also diagnose an older
-  crash straight from the Event Log (`around: "2026-10-22"`).
+  crash straight from the Event Log and the flight recorder (`around: "2026-10-22"` or
+  `"2026-10-26 18:09"`, matched against the moment the PC actually stopped). A power-off
+  while the GPU was idle points to a power cut or a manual power-off rather than the GPU's
+  power draw; RAM running below its standard speed, a clock that jumped at the restart and
+  a slow BIOS start are reported as signs that the BIOS settings were reset.
 
 New in 1.0, all worked out on the PC from the readings Tachyon already takes (no extra
 polling, no cloud, no AI model):
@@ -233,7 +237,7 @@ process_refresh_secs = 4
 process_cmdline = false     # true = also show command lines (off for privacy)
 process_hide = ["dwm.exe", "explorer.exe", "…"]   # hidden unless "show all"
 render_roots = []           # folders with render logs; empty = no render tracking
-blackbox = true             # flight recorder (about 340 KB on disk in total)
+blackbox = true             # flight recorder (about 460 KB on disk in total)
 blackbox_minutes = 15       # 1-60
 history = true              # job history
 # price_per_kwh = 0.30      # optional: show the energy cost of each job
@@ -278,7 +282,7 @@ writes only these:
 | Where | What |
 |---|---|
 | `tachyon.toml` next to the exe (or in `%LOCALAPPDATA%\Tachyon`) | your settings, with `.bak` and any `.corrupt-…` copies beside it |
-| `%LOCALAPPDATA%\Tachyon\blackbox\` | flight recorder: two fixed-size files of readings (about 340 KB) |
+| `%LOCALAPPDATA%\Tachyon\blackbox\` | flight recorder: two fixed-size files of readings (about 460 KB) |
 | `%LOCALAPPDATA%\Tachyon\history\jobs.jsonl` | finished jobs (rotated at 2 MB, one older file kept) |
 | `%LOCALAPPDATA%\Tachyon\exports\` | only when you choose *Export flight recorder* |
 | `%LOCALAPPDATA%\Tachyon\logs\` | a short text file if Tachyon itself crashes: version, time, where in its code it stopped and the error message; no readings |

@@ -391,7 +391,7 @@ impl App {
             }
         }
         if self.show_why {
-            for n in d.normal.iter().chain(std::iter::once(&d.note)) {
+            for n in d.hints.iter().chain(d.normal.iter()).chain(std::iter::once(&d.note)) {
                 for row in wrap_g(g, n, Face::Sans, 11.0, w, 2) {
                     g.stat(|g| g.text(&row, x0, y + 12.0, Face::Sans, 11.0, T_CYAN, H::L, V::Base));
                     y += 15.0;

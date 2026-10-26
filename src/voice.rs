@@ -436,6 +436,7 @@ mod tests {
             sentence: String::new(),
             normal: vec![],
             note: String::new(),
+            hints: vec![],
         });
         assert_eq!(t(&r)[1], "Likely cause: unstable RAM / EXPO (45%).");
         assert_eq!(t(&r).len(), 3);

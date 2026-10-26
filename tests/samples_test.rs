@@ -171,3 +171,37 @@ fn progress_json_and_eta() {
     assert_eq!(fmt_dur(3725.0), "1h 02m");
     assert_eq!(eta_secs(10, 5, 1.0), None);
 }
+
+/// The real flight recording of 26 Oct 2026 (1.0 format, the last 5 minutes before the PC lost
+/// power at idle): every record reads back, the process names are clean (1.0 wrote the third
+/// name over the checksum) and the diagnosis sees an idle GPU.
+#[test]
+fn real_recording_before_the_26_oct_power_loss() {
+    use tachyon::diagnose::{Context, Suspect, diagnose, idle_before};
+    use tachyon::events::{KERNEL_POWER, SysEvent};
+    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/samples/blackbox_2026-10-26_idle_power_loss.bin");
+    let s = tachyon::recorder::read_ring(&p);
+    assert_eq!(s.len(), 300);
+    assert!(s.windows(2).all(|w| w[0].t_ms < w[1].t_ms));
+    assert_eq!(s.last().unwrap().t_ms - s[0].t_ms, 299_234);
+    let mut names: Vec<&str> = s.iter().flat_map(|x| x.procs.iter().map(|p| p.name.as_str())).collect();
+    names.sort_unstable();
+    names.dedup();
+    assert!(names.contains(&"CrossDeviceResume.ex") && names.contains(&"dwm.exe"), "{names:?}");
+    assert!(names.iter().all(|n| n.chars().all(|c| !c.is_control() && c != '\u{fffd}') && n.len() <= 24), "{names:?}");
+    let last = s.last().unwrap().t_ms;
+    let lm: Vec<_> = s.iter().filter(|x| x.t_ms >= last - 60_000).cloned().collect();
+    let peaks = tachyon::report::peaks(&lm);
+    assert_eq!(idle_before(&peaks, &lm), Some((3, 22.9, Some(360.0), Some(33))));
+    let kp41 = SysEvent { t_ms: last + 3_816_000, provider: KERNEL_POWER.into(), id: 41, level: 1, code: None };
+    let d = diagnose(tachyon::report::Cause::Restart, &[kp41], true, &peaks, &lm, None, &Context::default()).unwrap();
+    assert_eq!(d.causes[0].suspect, Suspect::PowerCut, "{d:#?}");
+    assert!(d.causes.iter().find(|c| c.suspect == Suspect::Power).is_none_or(|c| c.percent <= 20), "{d:#?}");
+    // the 1.1 format keeps the whole name
+    let enc = tachyon::recorder::encode(&s[0], 1);
+    let mut full = s[0].clone();
+    full.procs[2].name = "CrossDeviceResume.exe".into();
+    let back = tachyon::recorder::decode(&tachyon::recorder::encode(&full, 2)).unwrap().1;
+    assert_eq!(back.procs[2].name, "CrossDeviceResume.exe");
+    assert_eq!(tachyon::recorder::decode(&enc).unwrap().1, s[0]);
+}

@@ -156,7 +156,10 @@ pub struct RamSpeed {
 /// How the memory speed compares with what the modules are made for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RamState {
-    /// At (or below) the standard JEDEC speed.
+    /// Clearly below the modules' standard (JEDEC) speed: EXPO/XMP off and the BIOS on its safe
+    /// defaults, typically after a BIOS reset (or with four modules, a cautious BIOS).
+    BelowStandard,
+    /// At the standard JEDEC speed.
     Standard,
     /// An EXPO/XMP profile at or below the kit's rated profile speed.
     Profile,
@@ -243,6 +246,9 @@ impl RamSpeed {
 
     pub fn state(&self) -> RamState {
         let Some(c) = self.configured_mts else { return RamState::Standard };
+        if self.below_rated() {
+            return RamState::BelowStandard;
+        }
         match self.kit_mts() {
             Some(k) if c > k + 100 => RamState::BeyondRating,
             Some(_) if self.above_rated() || (self.rated_mts.is_none() && self.above_cpu_spec()) => RamState::Profile,
@@ -265,6 +271,11 @@ impl RamSpeed {
             "{} DDR5 modules at {c} MT/s{mixed}: with two modules per channel most CPUs are only specified for about 3600-5200 MT/s",
             self.modules
         ))
+    }
+
+    /// The memory runs clearly slower than its rated (JEDEC) speed, e.g. 3600 MT/s on 4800 modules.
+    pub fn below_rated(&self) -> bool {
+        matches!((self.rated_mts, self.configured_mts), (Some(r), Some(c)) if c > 0 && c + 100 < r)
     }
 
     /// The memory runs faster than its rated speed (EXPO/XMP or a manual overclock).
@@ -404,6 +415,35 @@ pub fn ram_speed() -> Option<RamSpeed> {
 
 #[cfg(not(windows))]
 pub fn ram_speed() -> Option<RamSpeed> {
+    None
+}
+
+/// How long the firmware (BIOS/UEFI) took at the last start, in ms: Windows keeps it as
+/// `FwPOSTTime` (Task Manager's "Last BIOS time"). Read-only; None when missing.
+#[cfg(windows)]
+pub fn firmware_boot_ms() -> Option<u32> {
+    use windows_sys::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD, RegGetValueW};
+    let wz = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
+    let key = wz(r"SYSTEM\CurrentControlSet\Control\Session Manager\Power");
+    let val = wz("FwPOSTTime");
+    let mut v: u32 = 0;
+    let mut sz: u32 = 4;
+    let r = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            key.as_ptr(),
+            val.as_ptr(),
+            RRF_RT_REG_DWORD,
+            std::ptr::null_mut(),
+            &mut v as *mut _ as *mut _,
+            &mut sz,
+        )
+    };
+    (r == 0 && v > 0 && v < 3_600_000).then_some(v)
+}
+
+#[cfg(not(windows))]
+pub fn firmware_boot_ms() -> Option<u32> {
     None
 }
 
@@ -572,6 +612,13 @@ mod tests {
         assert_eq!(st(4800, 6400, "CMK32GX5M2B6000Z30").state(), RamState::BeyondRating);
         assert_eq!(st(4800, 4800, "CMK32GX5M2B6000Z30").state(), RamState::Standard);
         assert_eq!(st(4800, 6000, "").state(), RamState::AboveStandard, "no part number: rating unknown");
+        // 26 Oct: a BIOS reset left the same kit at 3600, below its 4800 standard
+        let reset = st(4800, 3600, "CMK32GX5M2B6000Z30");
+        assert!(reset.below_rated() && !reset.above_rated());
+        assert_eq!(reset.state(), RamState::BelowStandard);
+        assert_eq!(st(4800, 4800, "").state(), RamState::Standard);
+        assert_eq!(st(4800, 4750, "").state(), RamState::Standard, "a few MT/s under is still the standard speed");
+        assert_eq!(reset.crowded(), None);
         assert_eq!(
             now.crowded().as_deref(),
             Some(

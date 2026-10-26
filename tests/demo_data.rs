@@ -189,6 +189,7 @@ fn write_demo_diagnosis() {
             modules: 2,
             part: None,
         }),
+        ..Default::default()
     };
     let r = tachyon::report::build_with(&prev, Some(end + 50_000), Ok(events), now - 20 * 60_000, &ctx).expect("a report");
     assert!(r.diagnosis.is_some());

@@ -4,9 +4,11 @@
 //! files and the job history; if Tachyon is not running it takes its own short reading. No
 //! network: the client starts this process and talks to it through pipes.
 use crate::config::Config;
+use crate::events::SysEvent;
 use crate::history::{self, JobRecord};
 use crate::recorder;
 use crate::report;
+use crate::telemetry::Sample;
 use serde_json::{Value, json};
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
@@ -30,63 +32,459 @@ pub trait Source {
     fn events(&mut self, from_ms: i64, to_ms: i64) -> Result<Vec<crate::events::SysEvent>, String> {
         crate::events::query(from_ms, to_ms, 400)
     }
-    /// What the diagnosis knows about this PC now: RAM speed, GPU clock offsets.
+    /// What the diagnosis knows about this PC now: RAM speed, GPU clock offsets, BIOS start time.
     fn context(&mut self) -> crate::diagnose::Context {
-        crate::diagnose::Context { ram: crate::sysinfo::ram_speed(), ..Default::default() }
+        crate::diagnose::Context {
+            ram: crate::sysinfo::ram_speed(),
+            firmware_boot_ms: crate::sysinfo::firmware_boot_ms(),
+            ..Default::default()
+        }
+    }
+    /// The flight recorder's sessions ("current", "previous"), samples oldest first.
+    fn blackbox_sessions(&mut self) -> Vec<(String, Vec<Sample>)> {
+        vec![("current".into(), self.blackbox())]
+    }
+    /// The newest System log entries of any kind up to `to_ms`, oldest first.
+    fn last_log_before(&mut self, to_ms: i64) -> Result<Vec<SysEvent>, String> {
+        crate::events::last_before(to_ms, 64)
+    }
+    /// When the current boot started (Unix ms, by the clock now).
+    fn boot_ms(&mut self) -> Option<i64> {
+        crate::sysinfo::boot_time_ms()
     }
 }
 
-/// A local date ("2026-10-22", the whole day) or date and time ("2026-10-22 18:40", an hour
-/// either side) as a window in ms.
-fn parse_around(s: &str) -> Option<(i64, i64)> {
+/// Every recorded sample of both sessions, oldest first.
+fn all_samples(src: &mut dyn Source) -> Vec<Sample> {
+    let mut v: Vec<Sample> = src.blackbox_sessions().into_iter().flat_map(|(_, s)| s).collect();
+    v.sort_by_key(|s| s.t_ms);
+    v.dedup_by_key(|s| s.t_ms);
+    v
+}
+
+fn local_text(ms: i64, fmt: &str) -> String {
+    Sample { t_ms: ms, ..Default::default() }.local().format(fmt).to_string()
+}
+
+/// A time argument: Unix ms, RFC 3339, or local "2026-10-26 18:09[:30]" (or "18:09" for today).
+fn parse_time(v: &Value, name: &str) -> Result<Option<i64>, String> {
+    use chrono::{Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone};
+    let bad = || format!("`{name}` must be a local date and time such as 2026-10-26 18:09, or Unix milliseconds.");
+    let local = |n: NaiveDateTime| Local.from_local_datetime(&n).earliest().map(|d| d.timestamp_millis());
+    match v {
+        Value::Null => Ok(None),
+        Value::Number(n) => n.as_i64().filter(|t| *t > 0 && *t < 8_000_000_000_000).map(Some).ok_or_else(bad),
+        Value::String(s) => {
+            let s = s.trim().replace('T', " ");
+            if let Ok(d) = chrono::DateTime::parse_from_rfc3339(&s.replacen(' ', "T", 1)) {
+                return Ok(Some(d.timestamp_millis()));
+            }
+            for f in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"] {
+                if let Ok(n) = NaiveDateTime::parse_from_str(&s, f) {
+                    return local(n).map(Some).ok_or_else(bad);
+                }
+            }
+            for f in ["%H:%M:%S", "%H:%M"] {
+                if let Ok(t) = NaiveTime::parse_from_str(&s, f) {
+                    let today: NaiveDate = Local::now().date_naive();
+                    return local(today.and_time(t)).map(Some).ok_or_else(bad);
+                }
+            }
+            Err(bad())
+        }
+        _ => Err(bad()),
+    }
+}
+
+/// Plain summary of what the flight recorder saw: the window and its last minute.
+fn recorder_summary(window: &[Sample]) -> Value {
+    let Some(last) = window.last() else { return Value::Null };
+    let end = last.t_ms;
+    let lm: Vec<Sample> = window.iter().filter(|s| s.t_ms >= end - report::JUST_BEFORE_MS).cloned().collect();
+    let p = report::peaks(&lm);
+    let vals = |f: &dyn Fn(&Sample) -> Option<f32>| lm.iter().filter_map(f).collect::<Vec<f32>>();
+    let stat = |v: &[f32]| {
+        (!v.is_empty()).then(|| {
+            let min = v.iter().copied().fold(f32::MAX, f32::min);
+            let max = v.iter().copied().fold(f32::MIN, f32::max);
+            (min, (v.iter().sum::<f32>() / v.len() as f32 * 10.0).round() / 10.0, max)
+        })
+    };
+    let util = stat(&vals(&|s| s.util.map(f32::from)));
+    let power = stat(&vals(&|s| s.power_w));
+    let temp = stat(&vals(&|s| s.temp.map(f32::from)));
+    let cpu = stat(&vals(&|s| s.cpu));
+    let limit = p.power_limit_w;
+    let mut procs: Vec<(String, Option<f32>, Option<u8>)> = vec![];
+    for s in &lm {
+        for pr in &s.procs {
+            match procs.iter_mut().find(|q| q.0 == pr.name) {
+                Some(q) => {
+                    q.1 = match (q.1, pr.vram_mb) {
+                        (Some(a), Some(b)) => Some(a.max(b)),
+                        (a, b) => a.or(b),
+                    };
+                    q.2 = q.2.max(pr.sm);
+                }
+                None => procs.push((pr.name.clone(), pr.vram_mb, pr.sm)),
+            }
+        }
+    }
+    let mut mask = 0u32;
+    for s in &lm {
+        mask |= s.throttle.unwrap_or(0);
+    }
+    let idle = crate::diagnose::idle_before(&p, &lm).is_some();
+    let mut parts = vec![];
+    if let Some((lo, avg, hi)) = util {
+        parts.push(format!("GPU {lo:.0}-{hi:.0}% busy (average {avg:.0}%)"));
+    }
+    if let Some((lo, _, hi)) = power {
+        let of = limit.filter(|l| *l > 0.0).map(|l| format!(" of its {l:.0} W limit (at most {:.0}%)", hi / l * 100.0)).unwrap_or_default();
+        parts.push(format!("{lo:.0}-{hi:.0} W{of}"));
+    }
+    if let Some((lo, _, hi)) = temp {
+        parts.push(format!("{lo:.0}-{hi:.0} °C"));
+    }
+    if let Some((_, avg, _)) = cpu {
+        parts.push(format!("CPU {avg:.0}%"));
+    }
+    let state = if idle {
+        "the PC was idle"
+    } else if p.gpu_util.is_some_and(|u| u >= 90) {
+        "the GPU was fully busy"
+    } else {
+        "the GPU was in use"
+    };
+    let mut sentence = format!("In the last minute before {} {state}: {}.", local_text(end, "%H:%M:%S"), parts.join(", "));
+    if !procs.is_empty() {
+        sentence.push_str(&format!(" On the GPU: {}.", procs.iter().map(|p| p.0.as_str()).collect::<Vec<_>>().join(", ")));
+    }
+    let words = crate::telemetry::throttle_words(mask);
+    if !words.is_empty() {
+        sentence.push_str(&format!(" Clock limits reported: {}.", words.join(", ")));
+    }
+    json!({
+        "recorded_from": window.first().map(|s| local_text(s.t_ms, "%Y-%m-%d %H:%M:%S")),
+        "recorded_to": local_text(end, "%Y-%m-%d %H:%M:%S"),
+        "samples": window.len(),
+        "idle": idle,
+        "last_minute": {
+            "gpu_pct": util.map(|(lo, avg, hi)| json!({ "min": lo, "avg": avg, "max": hi })),
+            "power_w": power.map(|(lo, avg, hi)| json!({ "min": lo, "avg": avg, "max": hi })),
+            "power_limit_w": limit,
+            "power_max_pct_of_limit": power.zip(limit).filter(|(_, l)| *l > 0.0).map(|((_, _, hi), l)| (hi / l * 100.0).round()),
+            "temp_c": temp.map(|(lo, _, hi)| json!({ "min": lo, "max": hi })),
+            "vram_max_mb": p.vram_mb,
+            "cpu_avg_pct": cpu.map(|c| c.1),
+            "power_throttled_s": p.power_throttled_s,
+            "thermal_throttled_s": p.thermal_throttled_s,
+        },
+        "processes": procs.iter().map(|(n, v, sm)| json!({ "name": n, "vram_mb": v, "sm_pct": sm })).collect::<Vec<_>>(),
+        "clock_limits": words,
+        "sentence": sentence,
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Around {
+    /// A whole local day: [start, end).
+    Day(i64, i64),
+    /// A moment (local date and time).
+    At(i64),
+}
+
+/// A local date ("2026-10-22", the whole day) or date and time ("2026-10-22 18:40[:30]").
+fn parse_around(s: &str) -> Option<Around> {
     use chrono::{Local, NaiveDate, NaiveDateTime, TimeZone};
     let s = s.trim().replace('T', " ");
     let local = |n: NaiveDateTime| Local.from_local_datetime(&n).earliest().map(|d| d.timestamp_millis());
-    if let Ok(n) = NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M") {
-        let t = local(n)?;
-        return Some((t - 3_600_000, t + 3_600_000));
+    for f in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"] {
+        if let Ok(n) = NaiveDateTime::parse_from_str(&s, f) {
+            return local(n).map(Around::At);
+        }
     }
     let d = NaiveDate::parse_from_str(&s, "%Y-%m-%d").ok()?;
     let t = local(d.and_hms_opt(0, 0, 0)?)?;
-    Some((t, t + 86_400_000))
+    Some(Around::Day(t, t + 86_400_000))
 }
 
-/// `diagnose_crash` without a crash report (or for a date): the latest unexpected restart in the
-/// Event Log, diagnosed from the events around it and what Tachyon can read about the PC now.
-fn diagnose_from_event_log(args: &Value, src: &mut dyn Source, now: i64) -> Result<Value, String> {
-    let (from, to, what) = match args["around"].as_str() {
-        Some(a) => {
-            let (f, t) = parse_around(a).ok_or("`around` must be a local date (2026-10-22) or date and time (2026-10-22 18:40).")?;
-            (f, t, format!("around {}", a.trim()))
+/// Restart reports can be logged a while after the stop, and after a BIOS reset the clock at the
+/// next start can run hours ahead: the search looks this far past the time asked about.
+const LATE_MS: i64 = 3 * 3_600_000;
+/// The recorder writes every 5 s and flushes every 30 s: after a power cut the last ~35 s can be lost.
+const RECORDER_LOSS_MS: i64 = crate::recorder::SYNC_EVERY_MS + crate::recorder::WRITE_EVERY_MS;
+
+/// One unexpected restart in the Event Log: its reports, and when the PC most likely stopped.
+#[derive(Debug, Clone)]
+struct Stop {
+    /// First and last restart report (Kernel-Power 41, EventLog 6008, BugCheck 1001), as logged.
+    first: i64,
+    last: i64,
+    /// The last flight recorder sample before the restart (Tachyon's clock before the stop).
+    recorder_ms: Option<i64>,
+    /// Windows' last entry in the System log before the boot, and EventLog 6008's last sign of life.
+    log_ms: Option<i64>,
+    alive_ms: Option<i64>,
+}
+
+impl Stop {
+    /// Earliest moment the PC can have stopped (the latest sign of life).
+    fn earliest_ms(&self) -> Option<i64> {
+        [self.recorder_ms, self.log_ms, self.alive_ms].into_iter().flatten().max()
+    }
+    /// Latest moment, when the recorder was running: its last sample plus what may not have reached the disk.
+    fn until_ms(&self) -> Option<i64> {
+        let f = self.earliest_ms()?;
+        self.recorder_ms.map(|r| (r + RECORDER_LOSS_MS).max(f)).filter(|u| *u <= self.first.max(f))
+    }
+    fn source(&self) -> &'static str {
+        match self.earliest_ms() {
+            Some(f) if Some(f) == self.recorder_ms => "the flight recorder's last sample",
+            Some(f) if Some(f) == self.alive_ms => "Windows' last sign of life (EventLog 6008)",
+            Some(_) => "the last Windows log entry before the restart",
+            None => "the restart reports (the stop time itself is unknown)",
         }
+    }
+}
+
+/// Restart reports grouped into restarts (reports less than 15 minutes apart).
+fn restarts(found: &[SysEvent]) -> Vec<(i64, i64)> {
+    let mut t: Vec<i64> = found.iter().filter(|e| e.is_restart()).map(|e| e.t_ms).collect();
+    t.sort_unstable();
+    let mut out: Vec<(i64, i64)> = vec![];
+    for x in t {
+        match out.last_mut() {
+            Some(c) if x - c.1 <= 15 * 60_000 => c.1 = x,
+            _ => out.push((x, x)),
+        }
+    }
+    out
+}
+
+/// `diagnose_crash` without a crash report (or for a date or time): the unexpected restart in the
+/// Event Log that matches, with the stop time worked out from the flight recorder's last sample
+/// and Windows' last log entries, the recorder's readings from just before, and what Tachyon can
+/// read about the PC now.
+fn diagnose_from_event_log(args: &Value, src: &mut dyn Source, now: i64) -> Result<Value, String> {
+    let tol = args["tolerance_minutes"].as_u64().unwrap_or(90).clamp(5, 720) as i64 * 60_000;
+    let around = match args["around"].as_str() {
+        Some(a) => Some(
+            parse_around(a)
+                .ok_or("`around` must be a local date (2026-10-22) or date and time (2026-10-22 18:40).")
+                .map(|p| (p, a.trim().to_string()))?,
+        ),
+        None => None,
+    };
+    let (from, to, what) = match &around {
+        // not capped at now: after a BIOS reset the restart reports can carry a clock that ran ahead
+        Some((Around::At(t), a)) => (t - tol, t + tol + LATE_MS, format!("around {a} (within {} min)", tol / 60_000)),
+        Some((Around::Day(f, t), a)) => (*f, t + LATE_MS, format!("on {a}")),
         None => {
             let days = args["days"].as_u64().unwrap_or(14).clamp(1, 60) as i64;
-            (now - days * 86_400_000, now, format!("in the last {days} days"))
+            let span = if days == 1 { "day".to_string() } else { format!("{days} days") };
+            (now - days * 86_400_000, now + LATE_MS, format!("in the last {span}"))
         }
     };
     let found = src.events(from, to)?;
     let gpu_resets = found.iter().filter(|e| e.is_gpu()).count();
-    let Some(anchor) = found.iter().filter(|e| e.is_restart()).map(|e| e.t_ms).max() else {
+    let samples = all_samples(src);
+    let groups = restarts(&found);
+    // work out when the PC stopped, for each restart
+    let mut stops: Vec<Stop> = vec![];
+    for (i, &(first, last)) in groups.iter().enumerate() {
+        let floor = if i > 0 { groups[i - 1].1 } else { first - 12 * 3_600_000 };
+        let recorder_ms = samples.iter().rev().find(|s| s.t_ms < first && s.t_ms > floor).map(|s| s.t_ms);
+        let alive_ms =
+            found.iter().filter(|e| e.t_ms >= first && e.t_ms <= last).filter_map(|e| e.last_alive_ms()).filter(|t| *t < first).max();
+        let log = src.last_log_before(first).unwrap_or_default();
+        let boot = log.iter().filter(|e| e.is_boot_marker() && e.t_ms >= first - 10 * 60_000).map(|e| e.t_ms).min().unwrap_or(first);
+        let log_ms = log.iter().filter(|e| !e.is_boot_marker() && e.t_ms < boot && e.t_ms > floor).map(|e| e.t_ms).max();
+        stops.push(Stop { first, last, recorder_ms, log_ms, alive_ms });
+    }
+    let list = |stops: &[Stop]| {
+        stops
+            .iter()
+            .map(|s| {
+                format!(
+                    "restart logged at {}{}",
+                    local_text(s.first, "%Y-%m-%d %H:%M"),
+                    s.earliest_ms().map(|f| format!(", stopped at about {}", local_text(f, "%Y-%m-%d %H:%M:%S"))).unwrap_or_default()
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    // which restart: the one whose stop is nearest the time asked about (within the tolerance)
+    let pick = match &around {
+        Some((Around::At(t), _)) => stops
+            .iter()
+            .filter_map(|s| {
+                let d = match s.earliest_ms() {
+                    Some(f) => (f - t).abs(),
+                    // no stop time: the restart's own reports, which can come late or with a shifted clock
+                    None => (s.first - t).abs().min((s.first - t - LATE_MS).abs().max(0)),
+                };
+                let ok = if s.earliest_ms().is_some() { d <= tol } else { s.first >= t - tol && s.first <= t + tol + LATE_MS };
+                ok.then_some((d, s))
+            })
+            .min_by_key(|(d, _)| *d)
+            .map(|(_, s)| s.clone()),
+        Some((Around::Day(f, t), _)) => {
+            stops.iter().rev().find(|s| s.earliest_ms().unwrap_or(s.first) >= *f && s.earliest_ms().unwrap_or(s.first) < *t).cloned()
+        }
+        None => stops.last().cloned(),
+    };
+    let Some(stop) = pick else {
+        let mut note = format!("No unexpected restart in the Windows Event Log {what}");
+        if gpu_resets > 0 {
+            note.push_str(&format!(", but {gpu_resets} GPU driver event(s)"));
+        }
+        note.push('.');
+        if !stops.is_empty() {
+            note.push_str(&format!(" Found nearby: {}.", list(&stops).join("; ")));
+        }
         return Ok(json!({
             "diagnosis": null,
             "source": "event_log",
             "gpu_driver_events": gpu_resets,
-            "note": format!("No unexpected restart in the Windows Event Log {what}{}.", if gpu_resets > 0 { format!(", but {gpu_resets} GPU driver event(s)") } else { String::new() }),
+            "restarts_found": list(&stops),
+            "note": note,
         }));
     };
-    // the crash itself comes before the restart's reports (Kernel-Power 41, then the bug check);
-    // GPU driver resets in the 12 hours before count as signs of the same instability
-    let first = found.iter().filter(|e| e.is_restart() && e.t_ms >= anchor - 15 * 60_000).map(|e| e.t_ms).min().unwrap_or(anchor);
-    let ev = src.events(first - 12 * 3_600_000, anchor + 10 * 60_000)?;
-    let ctx = src.context();
-    let d = crate::diagnose::diagnose(report::Cause::Restart, &ev, true, &report::Peaks::default(), &[], None, &ctx);
-    let at = chrono::DateTime::from_timestamp_millis(first).map(|d| d.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string());
+    let (first, last) = (stop.first, stop.last);
+    // the crash itself comes before the restart's reports; GPU driver resets in the 12 hours
+    // before count as signs of the same instability; Windows correcting its clock afterwards
+    // tells how far off it was
+    let mut ev = src.events(first - 12 * 3_600_000, last + 10 * 60_000)?;
+    let later = src.events(last + 10 * 60_000, first + 86_400_000).unwrap_or_default();
+    let corrections: Vec<SysEvent> = later.into_iter().filter(|e| e.clock_change_s().is_some()).collect();
+    ev.extend(corrections.iter().cloned());
+    ev.sort_by_key(|e| e.t_ms);
+
+    // the flight recorder: only when it was running until (about) the stop
+    let rec_ok = stop.recorder_ms.is_some_and(|r| {
+        let others = [stop.log_ms, stop.alive_ms].into_iter().flatten().max();
+        match (others, &around) {
+            (Some(o), _) => r >= o - 5 * 60_000,
+            (None, Some((Around::At(t), _))) => (r - t).abs() <= tol,
+            (None, _) => first - r <= 20 * 60_000,
+        }
+    });
+    let window: Vec<Sample> = match stop.recorder_ms.filter(|_| rec_ok) {
+        Some(r) => samples.iter().filter(|s| s.t_ms <= r && s.t_ms >= r - report::TIMELINE_MS).cloned().collect(),
+        None => vec![],
+    };
+    let end = window.last().map_or(0, |s| s.t_ms);
+    let last_minute: Vec<Sample> = window.iter().filter(|s| s.t_ms >= end - report::JUST_BEFORE_MS).cloned().collect();
+    let peaks = report::peaks(&last_minute);
+    let holder = report::vram_holder(&window);
+
+    // is this restart the current boot? (the restart stamp in today's clock vs the boot time now)
+    let corr_ms: i64 = corrections.iter().filter_map(|e| e.clock_change_s()).sum::<i64>() * 1000;
+    let mut ctx = src.context();
+    ctx.just_after =
+        src.boot_ms().is_some_and(|b| (first + corr_ms - b).abs() <= 15 * 60_000) && stops.last().is_some_and(|s| s.first == first);
+    if !ctx.just_after {
+        ctx.firmware_boot_ms = None;
+    }
+    // the clock after the restart vs the time of the stop
+    let mut clock_note = None;
+    let fixed = corrections.iter().filter_map(|e| e.clock_change_s()).filter(|d| d.abs() >= 1800).max_by_key(|d| d.abs());
+    if let Some(d) = fixed {
+        clock_note = Some(format!(
+            "After the restart Windows corrected its clock by {}: the restart times above were logged with a clock {} by about that much.",
+            crate::events::signed_duration(d),
+            if d < 0 { "running ahead" } else { "running behind" }
+        ));
+    } else if let Some(f) = stop.earliest_ms() {
+        let gap = first - f;
+        if gap >= 50 * 60_000 {
+            let hours = ((gap as f64 / 3_600_000.0).round() as i64).max(1);
+            let reset = ctx.ram.as_ref().is_some_and(|r| r.below_rated()) || ctx.firmware_boot_ms.is_some_and(|f| f >= 45_000);
+            clock_note = Some(format!(
+                "Windows logged the restart at {}, {} min after the last sign of life at {}. If the PC was off for only a few minutes, the clock after the restart ran about {hours} h ahead{}.",
+                local_text(first, "%H:%M:%S"),
+                gap / 60_000,
+                local_text(f, "%H:%M:%S"),
+                if reset {
+                    " (a BIOS reset often sets the hardware clock wrong, and the RAM speed says the BIOS was reset)"
+                } else {
+                    " (a BIOS reset or a wrong hardware clock)"
+                }
+            ));
+            if reset {
+                ctx.clock_shift_min = Some(hours * 60);
+            }
+        } else if gap < -60_000 {
+            clock_note = Some(format!(
+                "Windows logged the restart at {}, before the last sign of life at {}: the clock after the restart ran behind.",
+                local_text(first, "%H:%M:%S"),
+                local_text(f, "%H:%M:%S")
+            ));
+            ctx.clock_shift_min = Some(gap / 60_000);
+        }
+    }
+    let d = crate::diagnose::diagnose(report::Cause::Restart, &ev, true, &peaks, &last_minute, holder.as_ref(), &ctx);
+    let stopped = stop.earliest_ms().map(|f| match (stop.until_ms().filter(|u| *u > f), stop.recorder_ms) {
+        (Some(u), Some(r)) if r == f => format!(
+            "between {} and about {} (the flight recorder's last sample, plus up to 35 s that may not have reached the disk)",
+            local_text(f, "%Y-%m-%d %H:%M:%S"),
+            local_text(u, "%H:%M:%S")
+        ),
+        (Some(u), Some(r)) => format!(
+            "between {} and about {} (from {}; the flight recorder's last sample is from {}, and up to 35 s after it may not have reached the disk)",
+            local_text(f, "%Y-%m-%d %H:%M:%S"),
+            local_text(u, "%H:%M:%S"),
+            stop.source(),
+            local_text(r, "%H:%M:%S")
+        ),
+        _ => format!("at about {} ({})", local_text(f, "%Y-%m-%d %H:%M:%S"), stop.source()),
+    });
+    let matched = match &around {
+        Some((Around::At(t), a)) => Some(match stop.earliest_ms() {
+            Some(f) => format!(
+                "{a}: the stop at {} is {} min from it (tolerance {} min).",
+                local_text(f, "%H:%M:%S"),
+                (f - t).abs() / 60_000,
+                tol / 60_000
+            ),
+            None => format!("{a}: matched by the restart reports at {} (no stop time found).", local_text(first, "%H:%M:%S")),
+        }),
+        _ => None,
+    };
+    let fmt_ev = |e: &SysEvent| format!("{}  {}", local_text(e.t_ms, "%m-%d %H:%M:%S"), e.describe());
+    let note = if window.is_empty() {
+        let why = match stop.recorder_ms {
+            Some(r) => format!(
+                "its last sample before this restart is from {}, too long before the stop to show the moments before it",
+                local_text(r, "%Y-%m-%d %H:%M")
+            ),
+            None => "it has no samples from before this restart (Tachyon was not running, or the recording has since been replaced: it keeps the current and the previous session)".into(),
+        };
+        format!(
+            "From the Windows Event Log only (the 12 hours before the restart): Tachyon's flight recorder could not help, {why}. The GPU clock offsets and RAM speed are as they are now, not necessarily as they were then."
+        )
+    } else {
+        format!(
+            "From the Windows Event Log (the 12 hours before the restart) and Tachyon's flight recorder ({} samples, the {} min before the stop). The GPU clock offsets and RAM speed are as they are now, not necessarily as they were then.",
+            window.len(),
+            (end - window[0].t_ms + 59_999) / 60_000
+        )
+    };
     Ok(json!({
-        "source": "event_log",
-        "restart_at": at,
+        "source": if window.is_empty() { "event_log" } else { "event_log+flight_recorder" },
+        "restart_at": local_text(first, "%Y-%m-%d %H:%M"),
+        "stopped": stopped,
+        "stopped_ms": stop.earliest_ms(),
+        "matched": matched,
+        "clock_note": clock_note,
+        "before_the_stop": recorder_summary(&window),
+        "most_vram": holder,
         "diagnosis": d,
-        "events": ev.iter().map(|e| format!("{}  {}", chrono::DateTime::from_timestamp_millis(e.t_ms).map(|d| d.with_timezone(&chrono::Local).format("%m-%d %H:%M:%S").to_string()).unwrap_or_default(), e.describe())).collect::<Vec<_>>(),
-        "note": "From the Windows Event Log only (the 12 hours before the restart): Tachyon has no readings from before this restart, and the GPU clock offsets and RAM speed are as they are now, not necessarily as they were then.",
+        "events": ev.iter().map(fmt_ev).collect::<Vec<_>>(),
+        "last_log_entry": stop.log_ms.map(|t| local_text(t, "%Y-%m-%d %H:%M:%S")),
+        "other_restarts": list(&stops.iter().filter(|s| s.first != first).cloned().collect::<Vec<_>>()),
+        "note": note,
     }))
 }
 
@@ -124,9 +522,12 @@ pub fn tools() -> Value {
         tool(
             "get_blackbox",
             "Flight recorder",
-            "The last minutes from Tachyon's flight recorder: peaks, the process holding the most VRAM, a per-minute timeline and, if asked, the samples. Also the last crash report, if any.",
+            "Tachyon's flight recorder: peaks, the process holding the most VRAM, a per-minute timeline, a plain summary of the last minute and, if asked, the samples. By default the last minutes up to now; with `since`/`until` any window still on disk, or a whole `session` (the recorder keeps the current and the previous session, e.g. the one before an unexpected restart). Also the last crash report, if any.",
             json!({
-                "minutes": { "type": "number", "description": "How many minutes back (1-60, default 5).", "minimum": 1, "maximum": 60 },
+                "minutes": { "type": "number", "description": "Window length in minutes (1-60, default 5; with `session` the whole session).", "minimum": 1, "maximum": 60 },
+                "since": { "type": "string", "description": "Optional start: local date and time (2026-10-26 18:00), or Unix ms." },
+                "until": { "type": "string", "description": "Optional end: local date and time (2026-10-26 18:10), or Unix ms. With `since` only: since + minutes (default 60)." },
+                "session": { "type": "string", "enum": ["current", "previous", "all"], "description": "Optional: read one recorder session. `previous` = the session before Tachyon last started (e.g. the minutes before an unexpected restart)." },
                 "include_samples": { "type": "boolean", "description": "Also return the samples (at most 300, evenly spread). Default false." },
             })
         ),
@@ -141,7 +542,8 @@ pub fn tools() -> Value {
             "Why did it crash?",
             "The probable causes of the last unexpected restart or GPU driver failure, ranked with a rough percentage: unstable RAM or EXPO/XMP, GPU overclock, power or PSU, overheating, driver timeout (TDR) or an application bug. Each with the evidence (bug check codes, NVIDIA driver resets, GPU timeout reports, WHEA errors, temperatures, power, clock offsets, memory speed) and one piece of advice. Uses Tachyon's crash report; without one (or with `around`) it diagnoses the latest unexpected restart in the Windows Event Log. Estimates, never certain; Tachyon changes no settings.",
             json!({
-                "around": { "type": "string", "description": "Optional local date (2026-10-22) or date and time (2026-10-22 18:40) of a past crash to diagnose from the Event Log." },
+                "around": { "type": "string", "description": "Optional local date (2026-10-22) or date and time (2026-10-22 18:40) of a past crash to diagnose from the Event Log and the flight recorder. Matched against the time the PC actually stopped (the recorder's last sample or Windows' last entry), not only the restart time." },
+                "tolerance_minutes": { "type": "integer", "description": "With a time in `around`: how far the stop may be from it (5-720, default 90).", "minimum": 5, "maximum": 720 },
                 "days": { "type": "integer", "description": "Without a crash report: how many days back to look (1-60, default 14).", "minimum": 1, "maximum": 60 },
             })
         ),
@@ -190,6 +592,71 @@ fn minute_lines(w: &[crate::telemetry::Sample]) -> Vec<Value> {
     out
 }
 
+/// The `get_blackbox` tool: a window of the flight recorder (by default the last minutes up to now).
+fn blackbox(args: &Value, src: &mut dyn Source, now: i64) -> Result<Value, String> {
+    let minutes = args["minutes"].as_f64().map(|m| m.clamp(1.0, 60.0));
+    let since = parse_time(&args["since"], "since")?;
+    let until = parse_time(&args["until"], "until")?;
+    let sessions = src.blackbox_sessions();
+    let which = args["session"].as_str().unwrap_or("all");
+    let mut pool: Vec<Sample> = match which {
+        "all" => sessions.iter().flat_map(|(_, v)| v.iter().cloned()).collect(),
+        "current" | "previous" => sessions.iter().filter(|(n, _)| n == which).flat_map(|(_, v)| v.iter().cloned()).collect(),
+        _ => return Err("`session` must be current, previous or all.".into()),
+    };
+    pool.sort_by_key(|s| s.t_ms);
+    pool.dedup_by_key(|s| s.t_ms);
+    let ms = |m: f64| (m * 60_000.0) as i64;
+    let (from, to) = match (since, until) {
+        (Some(f), Some(t)) => (f, t),
+        (Some(f), None) => (f, f + ms(minutes.unwrap_or(60.0))),
+        (None, Some(t)) => (t - ms(minutes.unwrap_or(5.0)), t),
+        // a whole session (its last hour at most)
+        (None, None) if args["session"].is_string() => {
+            let end = pool.last().map_or(now, |s| s.t_ms);
+            (end - ms(minutes.unwrap_or(60.0)), end)
+        }
+        (None, None) => (now - ms(minutes.unwrap_or(5.0)), now),
+    };
+    if to < from {
+        return Err("`until` is before `since`.".into());
+    }
+    let w: Vec<Sample> = pool.into_iter().filter(|s| s.t_ms >= from && s.t_ms <= to).collect();
+    let mut mask = 0u32;
+    for s in &w {
+        mask |= s.throttle.unwrap_or(0);
+    }
+    let mut v = json!({
+        "minutes": ((to - from) as f64 / 60_000.0 * 10.0).round() / 10.0,
+        "window": { "from": local_text(from, "%Y-%m-%d %H:%M:%S"), "to": local_text(to, "%Y-%m-%d %H:%M:%S") },
+        "samples_in_window": w.len(),
+        "from_ms": w.first().map(|s| s.t_ms),
+        "to_ms": w.last().map(|s| s.t_ms),
+        "peaks": report::peaks(&w),
+        "most_vram": report::vram_holder(&w),
+        "timeline": minute_lines(&w),
+        "summary": recorder_summary(&w),
+        "clock_limits": crate::telemetry::throttle_words(mask),
+        "sessions": sessions.iter().map(|(n, v)| json!({
+            "session": n,
+            "samples": v.len(),
+            "from": v.first().map(|s| local_text(s.t_ms, "%Y-%m-%d %H:%M:%S")),
+            "to": v.last().map(|s| local_text(s.t_ms, "%Y-%m-%d %H:%M:%S")),
+        })).collect::<Vec<_>>(),
+        "last_crash_report": src.report(),
+    });
+    if w.is_empty() {
+        v["note"] = json!(
+            "Nothing recorded in this window. The flight recorder runs while Tachyon is open (blackbox = true) and keeps the current and the previous session: see `sessions` for what is on disk."
+        );
+    }
+    if args["include_samples"].as_bool().unwrap_or(false) {
+        let step = w.len().div_ceil(300).max(1);
+        v["samples"] = json!(w.iter().step_by(step).collect::<Vec<_>>());
+    }
+    Ok(v)
+}
+
 fn call(name: &str, args: &Value, src: &mut dyn Source) -> Result<Value, String> {
     if !src.enabled() {
         return Err(OFF.into());
@@ -209,30 +676,7 @@ fn call(name: &str, args: &Value, src: &mut dyn Source) -> Result<Value, String>
             let s = src.status();
             Ok(json!({ "processes": s["reading"]["procs"], "source": s["source"] }))
         }
-        "get_blackbox" => {
-            let minutes = args["minutes"].as_f64().unwrap_or(5.0).clamp(1.0, 60.0);
-            let all = src.blackbox();
-            let from = now - (minutes * 60_000.0) as i64;
-            let w: Vec<_> = all.into_iter().filter(|s| s.t_ms >= from).collect();
-            let mut v = json!({
-                "minutes": minutes,
-                "samples_in_window": w.len(),
-                "from_ms": w.first().map(|s| s.t_ms),
-                "to_ms": w.last().map(|s| s.t_ms),
-                "peaks": report::peaks(&w),
-                "most_vram": report::vram_holder(&w),
-                "timeline": minute_lines(&w),
-                "last_crash_report": src.report(),
-            });
-            if w.is_empty() {
-                v["note"] = json!("Nothing recorded in this window. The flight recorder runs while Tachyon is open (blackbox = true).");
-            }
-            if args["include_samples"].as_bool().unwrap_or(false) {
-                let step = w.len().div_ceil(300).max(1);
-                v["samples"] = json!(w.iter().step_by(step).collect::<Vec<_>>());
-            }
-            Ok(v)
-        }
+        "get_blackbox" => blackbox(args, src, now),
         "get_history" => {
             let n = args["n"].as_u64().unwrap_or(10).clamp(1, 100) as usize;
             let jobs = src.history(n);
@@ -247,7 +691,13 @@ fn call(name: &str, args: &Value, src: &mut dyn Source) -> Result<Value, String>
                 Some(d) => (Some(d), false),
                 None => {
                     // a report from 1.0: work it out from what the report kept
-                    let ctx = crate::diagnose::Context { ram: crate::sysinfo::ram_speed(), ..Default::default() };
+                    let mut ctx = src.context();
+                    ctx.oc = None;
+                    ctx.just_after = r.cause == report::Cause::Restart
+                        && r.boot_ms.zip(src.boot_ms()).is_some_and(|(a, b)| (a - b).abs() <= 15 * 60_000);
+                    if !ctx.just_after {
+                        ctx.firmware_boot_ms = None;
+                    }
                     let ev: Vec<_> = r.events.iter().map(|e| e.event.clone()).collect();
                     (
                         crate::diagnose::diagnose(
@@ -271,6 +721,11 @@ fn call(name: &str, args: &Value, src: &mut dyn Source) -> Result<Value, String>
                 "events": r.events.iter().map(|e| e.text.clone()).collect::<Vec<_>>(),
                 "just_before": r.just_before,
             });
+            let window: Vec<Sample> =
+                all_samples(src).into_iter().filter(|s| s.t_ms <= r.stopped_ms && s.t_ms >= r.stopped_ms - report::TIMELINE_MS).collect();
+            if !window.is_empty() {
+                v["before_the_stop"] = recorder_summary(&window);
+            }
             if d.is_none() {
                 v["note"] = json!("Tachyon stopped without closing, but Windows logged nothing that points to a system problem.");
             } else if recomputed {
@@ -497,6 +952,10 @@ impl Source for Live {
         self.dir.as_ref().map(|d| recorder::read_current(&d.join("blackbox"))).unwrap_or_default()
     }
 
+    fn blackbox_sessions(&mut self) -> Vec<(String, Vec<Sample>)> {
+        self.dir.as_ref().map(|d| recorder::read_sessions(&d.join("blackbox"))).unwrap_or_default()
+    }
+
     fn report(&mut self) -> Option<report::Report> {
         report::load(&self.dir.as_ref()?.join("blackbox"))
     }
@@ -511,7 +970,13 @@ impl Source for Live {
             let sel = self.cfg.gpu_index.min(n.names.len().saturating_sub(1) as u32);
             n.oc_info(sel)
         });
-        crate::diagnose::Context { oc: oc.filter(|o| !o.is_empty()), oc_after: true, ram: crate::sysinfo::ram_speed() }
+        crate::diagnose::Context {
+            oc: oc.filter(|o| !o.is_empty()),
+            oc_after: true,
+            ram: crate::sysinfo::ram_speed(),
+            firmware_boot_ms: crate::sysinfo::firmware_boot_ms(),
+            ..Default::default()
+        }
     }
 }
 
@@ -608,6 +1073,9 @@ mod tests {
         status: Option<Value>,
         events: Vec<crate::events::SysEvent>,
         ctx: crate::diagnose::Context,
+        sessions: Vec<(String, Vec<Sample>)>,
+        log: Vec<crate::events::SysEvent>,
+        boot: Option<i64>,
     }
 
     impl Source for Fake {
@@ -636,6 +1104,144 @@ mod tests {
         }
         fn context(&mut self) -> crate::diagnose::Context {
             self.ctx.clone()
+        }
+        fn blackbox_sessions(&mut self) -> Vec<(String, Vec<Sample>)> {
+            if self.sessions.is_empty() { vec![("current".into(), self.blackbox())] } else { self.sessions.clone() }
+        }
+        fn last_log_before(&mut self, to: i64) -> Result<Vec<crate::events::SysEvent>, String> {
+            Ok(self.log.iter().filter(|e| e.t_ms <= to).cloned().collect())
+        }
+        fn boot_ms(&mut self) -> Option<i64> {
+            self.boot
+        }
+    }
+
+    /// The real recording of 26 Oct 2026 (the last 5 minutes, 1.0 format, as found on the PC).
+    fn oct26() -> Vec<Sample> {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/samples/blackbox_2026-10-26_idle_power_loss.bin");
+        crate::recorder::read_ring(&p)
+    }
+
+    /// 26 Oct 2026: idle at the desktop, the PC went off at 18:09 (a USB stick in the BIOS
+    /// FlashBack port). Kernel-Power 41 code 0, no dump; the BIOS came back on its defaults, so
+    /// the RAM ran at 3600 and the clock at the next start was 1 h fast: Windows logged the
+    /// restart at 19:12 for a boot at 18:12. `around 18:09` must find it and use the recorder.
+    fn oct26_fake() -> (Fake, i64) {
+        use crate::events::{KERNEL_GENERAL, KERNEL_POWER};
+        let rec = oct26();
+        let last = rec.last().unwrap().t_ms; // 18:09:04 Rome
+        let shifted_boot = last + 3 * 60_000 + 18_000 + 3_600_000; // 18:12:22 real, logged as 19:12:22
+        let e = |t: i64, p: &str, id: u32, code: Option<String>| SysEvent { t_ms: t, provider: p.into(), id, level: 2, code };
+        let alive = chrono::DateTime::from_timestamp_millis(last + 29_000).unwrap().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+        let events = vec![
+            e(last - 3 * 86_400_000, "nvlddmkm", 153, None), // days before: outside the 12 h
+            e(shifted_boot + 18_000, KERNEL_POWER, 41, None),
+            e(shifted_boot + 19_000, "EventLog", 6008, Some(alive)),
+        ];
+        let log = vec![
+            e(last - 7 * 60_000, "Service Control Manager", 7036, None),
+            e(shifted_boot + 2_000, KERNEL_GENERAL, 12, None),
+            e(shifted_boot + 9_000, "EventLog", 6005, None),
+            e(shifted_boot + 18_000, KERNEL_POWER, 41, None),
+        ];
+        let kit = crate::sysinfo::RamSpeed {
+            kind: "DDR5".into(),
+            rated_mts: Some(4800),
+            configured_mts: Some(3600),
+            modules: 4,
+            part: Some("CMK32GX5M2B6000Z30".into()),
+        };
+        let now_rec: Vec<Sample> =
+            (0..120).map(|i| Sample { t_ms: shifted_boot + 120_000 + i * 1000, util: Some(2), ..Default::default() }).collect();
+        let f = Fake {
+            on: true,
+            events,
+            log,
+            boot: Some(shifted_boot),
+            ctx: crate::diagnose::Context { ram: Some(kit), firmware_boot_ms: Some(31_000), ..Default::default() },
+            sessions: vec![("current".into(), now_rec), ("previous".into(), rec)],
+            ..Default::default()
+        };
+        (f, last)
+    }
+
+    #[test]
+    fn diagnose_crash_uses_the_recorder_and_matches_the_stop_time() {
+        let call = |f: &mut Fake, a: Value| rpc(f, 5, "tools/call", json!({ "name": "diagnose_crash", "arguments": a }))["result"].clone();
+        let (mut f, last) = oct26_fake();
+        let at = local_text(last, "%Y-%m-%d %H:%M");
+        let r = call(&mut f, json!({ "around": at, "days": 1 }))["structuredContent"].clone();
+        let txt = serde_json::to_string_pretty(&r).unwrap();
+        assert_eq!(r["source"], "event_log+flight_recorder", "{txt}");
+        assert_eq!(r["stopped_ms"], last + 29_000, "the 6008 sign of life is the latest");
+        assert!(r["stopped"].as_str().unwrap().contains(&format!("and about {}", local_text(last + 35_000, "%H:%M:%S"))), "{txt}");
+        assert!(r["matched"].as_str().unwrap().contains("is 0 min from it"), "{txt}");
+        assert!(r["clock_note"].as_str().unwrap().contains("ran about 1 h ahead"), "{txt}");
+        let b = &r["before_the_stop"];
+        assert_eq!(b["idle"], true, "{txt}");
+        assert_eq!(b["last_minute"]["power_limit_w"], 360.0);
+        assert!(b["last_minute"]["power_w"]["max"].as_f64().unwrap() < 30.0, "{txt}");
+        let sentence = b["sentence"].as_str().unwrap();
+        assert!(
+            sentence.contains("the PC was idle") && sentence.contains("CrossDeviceResume.ex") && sentence.contains("reliability policy"),
+            "{sentence}"
+        );
+        assert!(!txt.contains('\u{fffd}'), "no garbage characters");
+        let d = &r["diagnosis"];
+        assert_eq!(d["causes"][0]["suspect"], "power_cut", "{txt}");
+        let power = d["causes"].as_array().unwrap().iter().find(|c| c["suspect"] == "power").map_or(0, |c| c["percent"].as_u64().unwrap());
+        assert!(power <= 20, "{txt}");
+        assert!(d["hints"][0].as_str().unwrap().starts_with("BIOS likely reset to safe defaults (EXPO/XMP off) at this restart"), "{txt}");
+        assert!(d["hints"][0].as_str().unwrap().contains("about 1 h ahead"), "{txt}");
+        assert!(
+            !r["note"].as_str().unwrap().contains("no readings") && r["note"].as_str().unwrap().contains("flight recorder (300 samples"),
+            "{txt}"
+        );
+        assert!(!r["events"].as_array().unwrap().iter().any(|e| e.as_str().unwrap().contains("nvlddmkm")), "{txt}");
+        // the stop is matched, not the boot: 16:00 with 90 min tolerance finds nothing, 17:00 with 120 does
+        let early = local_text(last - 129 * 60_000, "%Y-%m-%d %H:%M");
+        let r = call(&mut f, json!({ "around": early }))["structuredContent"].clone();
+        assert!(r["diagnosis"].is_null() && r["note"].as_str().unwrap().contains("Found nearby"), "{r:#}");
+        let r = call(&mut f, json!({ "around": early, "tolerance_minutes": 150 }))["structuredContent"].clone();
+        assert_eq!(r["diagnosis"]["causes"][0]["suspect"], "power_cut", "{r:#}");
+        // the whole day, and no `around` (latest restart)
+        let day = local_text(last, "%Y-%m-%d");
+        for a in [json!({ "around": day }), json!({ "days": 1 })] {
+            let r = call(&mut f, a)["structuredContent"].clone();
+            assert_eq!(r["source"], "event_log+flight_recorder", "{r:#}");
+        }
+        // without the recorder: the Event Log only, and it says why
+        f.sessions = vec![("current".into(), vec![Sample { t_ms: last + 7_200_000, ..Default::default() }])];
+        let r = call(&mut f, json!({ "around": at }))["structuredContent"].clone();
+        assert_eq!(r["source"], "event_log");
+        assert!(r["note"].as_str().unwrap().contains("no samples from before this restart"), "{r:#}");
+        assert!(r["before_the_stop"].is_null());
+    }
+
+    #[test]
+    fn blackbox_reads_older_windows_and_the_previous_session() {
+        let call = |f: &mut Fake, a: Value| rpc(f, 6, "tools/call", json!({ "name": "get_blackbox", "arguments": a }))["result"].clone();
+        let (mut f, last) = oct26_fake();
+        let r = call(&mut f, json!({ "session": "previous", "include_samples": true }))["structuredContent"].clone();
+        assert_eq!(r["samples_in_window"], 300, "{}", r["window"]);
+        assert_eq!(r["to_ms"], last);
+        assert_eq!(r["sessions"].as_array().unwrap().len(), 2);
+        assert_eq!(r["summary"]["idle"], true);
+        assert!(r["clock_limits"][0].as_str().unwrap().starts_with("reliability policy"));
+        let since = local_text(last - 60_000, "%Y-%m-%d %H:%M:%S");
+        let until = local_text(last, "%Y-%m-%d %H:%M:%S");
+        let r = call(&mut f, json!({ "since": since, "until": until }))["structuredContent"].clone();
+        assert!((59..=61).contains(&r["samples_in_window"].as_u64().unwrap()), "{r:#}");
+        let r = call(&mut f, json!({ "until": until, "minutes": 2 }))["structuredContent"].clone();
+        assert!((119..=121).contains(&r["samples_in_window"].as_u64().unwrap()));
+        let r = call(&mut f, json!({ "since": last - 30_000 }))["structuredContent"].clone();
+        assert!((30..=32).contains(&r["samples_in_window"].as_u64().unwrap()), "Unix ms, until = since + 60 min: {r:#}");
+        // the default is still "the last minutes up to now"
+        let r = call(&mut f, json!({}))["structuredContent"].clone();
+        assert_eq!(r["samples_in_window"], 0);
+        assert!(r["note"].as_str().unwrap().contains("sessions"));
+        for bad in [json!({ "since": "yesterday" }), json!({ "session": "old" }), json!({ "since": until, "until": since })] {
+            assert_eq!(call(&mut f, bad.clone())["isError"], true, "{bad}");
         }
     }
 
@@ -777,10 +1383,10 @@ mod tests {
     fn diagnose_crash_from_the_event_log() {
         use crate::events::{KERNEL_POWER, SysEvent, WER_SYSTEM};
         let call = |f: &mut Fake, a: Value| rpc(f, 5, "tools/call", json!({ "name": "diagnose_crash", "arguments": a }))["result"].clone();
-        let day = parse_around("2026-10-22").unwrap();
-        assert_eq!(day.1 - day.0, 86_400_000);
-        let at = parse_around("2026-10-22 18:40").unwrap();
-        let t = at.0 + 3_600_000;
+        let Some(Around::Day(d0, d1)) = parse_around("2026-10-22") else { panic!() };
+        assert_eq!(d1 - d0, 86_400_000);
+        let Some(Around::At(t)) = parse_around("2026-10-22 18:40") else { panic!() };
+        assert_eq!(parse_around("2026-10-22T18:40:30"), Some(Around::At(t + 30_000)));
         let ev = |dt: i64, p: &str, id: u32, code: Option<&str>| SysEvent {
             t_ms: t + dt * 1000,
             provider: p.into(),

@@ -283,6 +283,10 @@ impl Engine {
             oc: self.prev_oc.clone().or_else(|| self.oc_now.clone()),
             oc_after: self.prev_oc.is_none() && self.oc_now.is_some(),
             ram: crate::sysinfo::ram_speed(),
+            firmware_boot_ms: crate::sysinfo::firmware_boot_ms(),
+            // the first start since the stop: the RAM speed and BIOS time read now are from right after it
+            just_after: true,
+            clock_shift_min: None,
         };
         let Some(mut r) = crate::report::build_with(prev, crate::sysinfo::boot_time_ms(), events, now_ms, &ctx) else { return };
         // Hex announces unexpected restarts; a Tachyon-only stop just gets the panel banner

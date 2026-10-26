@@ -10,6 +10,28 @@ use serde::{Deserialize, Serialize};
 pub const THR_POWER: u32 = 0x4 | 0x80;
 pub const THR_THERMAL: u32 = 0x20 | 0x40 | 0x8;
 
+/// Plain words for the NVML clock event (throttle) reason bits in `mask`.
+pub fn throttle_words(mask: u32) -> Vec<&'static str> {
+    const NAMES: [(u32, &str); 11] = [
+        (0x1, "idle (nothing to do)"),
+        (0x2, "application clock setting"),
+        (0x4, "power limit"),
+        (0x8, "hardware slowdown"),
+        (0x10, "sync boost"),
+        (0x20, "temperature limit (driver)"),
+        (0x40, "temperature limit (hardware)"),
+        (0x80, "power brake (from the power supply or board)"),
+        (0x100, "display clock setting"),
+        (0x200, "board limit policy"),
+        (0x400, "reliability policy (the driver holding the clocks in a safe range, seen at idle too)"),
+    ];
+    let mut v: Vec<&str> = NAMES.iter().filter(|(b, _)| mask & b != 0).map(|(_, n)| *n).collect();
+    if mask & !0x7ff != 0 {
+        v.push("other (unknown to Tachyon)");
+    }
+    v
+}
+
 /// A GPU process in a sample (the top few only).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct Proc {
@@ -187,5 +209,13 @@ mod tests {
         assert_eq!(s.pcie_max, Some(1969.0 * 16.0));
         assert_eq!(s.util, Some(255), "clamped into u8");
         assert_eq!(pcie_lane_mbs(9), None);
+    }
+
+    #[test]
+    fn throttle_reasons_in_words() {
+        assert_eq!(throttle_words(0x400), ["reliability policy (the driver holding the clocks in a safe range, seen at idle too)"]);
+        assert_eq!(throttle_words(0x4 | 0x20), ["power limit", "temperature limit (driver)"]);
+        assert!(throttle_words(0).is_empty());
+        assert_eq!(throttle_words(0x1000).last(), Some(&"other (unknown to Tachyon)"));
     }
 }

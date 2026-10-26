@@ -319,6 +319,20 @@ pub fn read_current(dir: &Path) -> Vec<Sample> {
     }
 }
 
+/// Both sessions on disk: ("current", the ring named in `session.json`) and ("previous", the
+/// other ring). Without `session.json` both rings are "previous".
+pub fn read_sessions(dir: &Path) -> Vec<(String, Vec<Sample>)> {
+    let cur = read_session(dir).map(|s| s.file);
+    ["a", "b"]
+        .iter()
+        .map(|w| {
+            let name = if cur.as_deref() == Some(*w) { "current" } else { "previous" };
+            (name.to_string(), read_ring(&ring_path(dir, w)))
+        })
+        .filter(|(_, v)| !v.is_empty())
+        .collect()
+}
+
 /// Largest ring file read back.
 pub const MAX_RING_BYTES: u64 = 8 << 20;
 
@@ -657,6 +671,26 @@ mod tests {
         let p3 = prev3.unwrap();
         assert!(p3.session.clean);
         assert_eq!(p3.samples.len(), 1);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn both_sessions_are_readable() {
+        let d = tmp("sessions");
+        {
+            let (mut r, _) = Recorder::open(&d, 15, 1000, 1000).unwrap();
+            r.push(&sample(1), 1000);
+            r.close(2000);
+        }
+        let (mut r2, _) = Recorder::open(&d, 15, 1000, 5000).unwrap();
+        r2.push(&sample(9), 9000);
+        r2.push(&sample(10), 10_000);
+        r2.close(11_000);
+        let s = read_sessions(&d);
+        let names: Vec<(&str, usize)> = s.iter().map(|(n, v)| (n.as_str(), v.len())).collect();
+        assert_eq!(names, [("previous", 1), ("current", 2)]);
+        std::fs::remove_file(d.join("session.json")).unwrap();
+        assert!(read_sessions(&d).iter().all(|(n, _)| n == "previous"));
         let _ = std::fs::remove_dir_all(&d);
     }
 

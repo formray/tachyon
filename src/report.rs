@@ -310,6 +310,9 @@ impl Report {
                 }
                 out.push_str(&format!("        Try: {}\n", c.advice));
             }
+            for h in &d.hints {
+                out.push_str(&format!("  Note: {h}\n"));
+            }
             for n in &d.normal {
                 out.push_str(&format!("  Normal: {n}\n"));
             }
