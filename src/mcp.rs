@@ -81,6 +81,17 @@ pub fn tools() -> Value {
             json!({})
         ),
         tool(
+            "preflight",
+            "Will this job fit?",
+            "Pre-render check: predicts a render job's peak VRAM and duration from similar past runs (same job, same project, or a similar name, at the same resolution) and compares it with the VRAM free right now, including memory held by idle background apps. Returns fits / tight / wont_fit / unknown with a confidence, one plain sentence and the evidence. Without arguments it checks the render job that is running. Thin history gives `unknown`, never a guess.",
+            json!({
+                "name": { "type": "string", "description": "Job name, e.g. \"demo4k try 3\" (default: the running render job)." },
+                "project": { "type": "string", "description": "Optional project folder name." },
+                "resolution": { "type": "string", "description": "Optional resolution: 4K, 1440p, 1080p, 720p, 8K or WxH such as 3840x2160." },
+                "frames": { "type": "integer", "description": "Optional frame count, for the duration.", "minimum": 1 },
+            })
+        ),
+        tool(
             "compare_last_run",
             "Compare with last time",
             "Compares the latest job (or the latest job whose name contains `name`) with the previous run of the same job.",
@@ -203,6 +214,7 @@ fn call(name: &str, args: &Value, src: &mut dyn Source) -> Result<Value, String>
             }
             Ok(v)
         }
+        "preflight" => preflight(args, src),
         "compare_last_run" => {
             let filter = args["name"].as_str().map(str::to_lowercase);
             let jobs = src.history(2000);
@@ -217,6 +229,54 @@ fn call(name: &str, args: &Value, src: &mut dyn Source) -> Result<Value, String>
         }
         _ => Err(format!("Unknown tool: {name}")),
     }
+}
+
+/// The `preflight` tool: the running job's published check, or a check for the job asked about.
+fn preflight(args: &Value, src: &mut dyn Source) -> Result<Value, String> {
+    use crate::preflight::{LiveVram, Query, predict};
+    let s = src.status();
+    let arg = |k: &str| args[k].as_str().map(str::trim).filter(|v| !v.is_empty()).map(str::to_string);
+    let resolution = arg("resolution").map(|r| crate::parse::resolution_hint(&r).map(crate::parse::resolution_label).unwrap_or(r));
+    let running = s["render"]["job"].as_str().map(str::to_string);
+    let Some(name) = arg("name").or_else(|| running.clone()) else {
+        return Ok(
+            json!({ "preflight": null, "note": "No render job is running. Pass `name` (and `resolution`) to check a job before starting it." }),
+        );
+    };
+    let is_running = running
+        .as_ref()
+        .is_some_and(|r| history::job_key(history::JobKind::Render, r) == history::job_key(history::JobKind::Render, &name));
+    // the running Tachyon's own check knows what the job already holds
+    if is_running
+        && !s["preflight"].is_null()
+        && arg("project").is_none()
+        && args["frames"].is_null()
+        && resolution.as_ref().is_none_or(|r| s["preflight"]["resolution"].as_str().is_some_and(|x| x.eq_ignore_ascii_case(r)))
+    {
+        return Ok(json!({ "preflight": s["preflight"], "source": s["source"] }));
+    }
+    let from_render = |k: &str| if is_running { s["render"][k].as_str().map(str::to_string) } else { None };
+    let q = Query {
+        name,
+        project: arg("project").or_else(|| from_render("project")),
+        resolution: resolution.or_else(|| from_render("resolution")),
+        frames: args["frames"].as_u64().or_else(|| if is_running { s["render"]["total_frames"].as_u64() } else { None }),
+    };
+    let r = &s["reading"];
+    let live = LiveVram {
+        total_mb: r["vram_total_mb"].as_f64().map(|v| v as f32),
+        used_mb: r["vram_mb"].as_f64().map(|v| v as f32),
+        job_now_mb: 0.0,
+        hogs: serde_json::from_value(s["vram_forecast"]["hogs"].clone()).unwrap_or_default(),
+    };
+    let p = predict(&q, &src.history(500), &live);
+    let mut v = json!({ "preflight": p, "source": s["source"] });
+    if is_running {
+        v["note"] = json!("This job is already running: what it holds now counts as used here.");
+    } else if live.used_mb.is_none() {
+        v["note"] = json!("No VRAM reading right now, so only the history is shown.");
+    }
+    Ok(v)
 }
 
 fn ok(id: &Value, result: Value) -> Value {
@@ -245,7 +305,8 @@ pub fn handle(msg: &Value, src: &mut dyn Source) -> Option<Value> {
                     "protocolVersion": v,
                     "capabilities": { "tools": { "listChanged": false } },
                     "serverInfo": { "name": "tachyon", "title": "Tachyon GPU monitor", "version": env!("CARGO_PKG_VERSION") },
-                    "instructions": "Read-only view of this PC's NVIDIA GPU from Tachyon. Use get_bottleneck to explain slowness, get_vram_forecast before loading large models, get_blackbox and diagnose_crash after a crash, get_history and compare_last_run for render jobs.",
+                    "instructions": "Read-only view of this PC's NVIDIA GPU from Tachyon. Use get_bottleneck to explain slowness, get_vram_forecast before loading large models, get_blackbox and diagnose_crash after a crash, preflight before starting a render (will it fit?), get_history and compare_last_run for render jobs.",
+
                 }),
             )
         }
@@ -471,6 +532,7 @@ mod tests {
         on: bool,
         jobs: Vec<JobRecord>,
         report: Option<report::Report>,
+        status: Option<Value>,
     }
 
     impl Source for Fake {
@@ -478,6 +540,9 @@ mod tests {
             self.on
         }
         fn status(&mut self) -> Value {
+            if let Some(s) = &self.status {
+                return s.clone();
+            }
             json!({ "source": "tachyon", "bottleneck": { "kind": "gpu_bound", "sentence": "The GPU is the limit." }, "vram_forecast": { "warning": "At this rate VRAM will be full in ~3 min." }, "reading": { "procs": [{ "name": "python.exe" }] } })
         }
         fn blackbox(&mut self) -> Vec<Sample> {
@@ -532,12 +597,66 @@ mod tests {
                 "get_blackbox",
                 "get_history",
                 "diagnose_crash",
+                "preflight",
                 "compare_last_run"
             ]
         );
         assert!(r["result"]["tools"].as_array().unwrap().iter().all(|t| t["annotations"]["readOnlyHint"] == true));
         assert_eq!(rpc(&mut f, 3, "ping", json!({}))["result"], json!({}));
         assert_eq!(rpc(&mut f, 4, "resources/list", json!({}))["error"]["code"], -32601);
+    }
+
+    #[test]
+    fn preflight_checks_a_named_job_or_the_running_one() {
+        let mut jobs = vec![];
+        for i in 0..3 {
+            let mut j = job(&format!("demo4k try {i}"), i * 4_000_000, 1800.0);
+            j.peak_vram_mb = Some(15000.0);
+            j.profile.own_vram_mb = Some(15900.0 + i as f32 * 10.0);
+            j.profile.hints.resolution = Some("4K".into());
+            j.profile.hints.frames = Some(240);
+            jobs.push(j);
+        }
+        let status = json!({
+            "source": "tachyon",
+            "reading": { "vram_mb": 1800.0, "vram_total_mb": 16376.0 },
+            "vram_forecast": { "hogs": [{ "name": "chrome.exe", "category": "Browser", "vram_mb": 1230.0, "idle_secs": 300.0 }] },
+            "render": null, "preflight": null,
+        });
+        let mut f = Fake { on: true, jobs, status: Some(status.clone()), ..Default::default() };
+        let call = |f: &mut Fake, args: Value| rpc(f, 9, "tools/call", json!({ "name": "preflight", "arguments": args }))["result"].clone();
+        // nothing running, no name
+        let r = call(&mut f, json!({}));
+        assert!(r["structuredContent"]["note"].as_str().unwrap().starts_with("No render job is running"));
+        // before starting: named, resolution written any way
+        let r = call(&mut f, json!({ "name": "demo4k try 3", "resolution": "3840x2160", "frames": 480 }))["structuredContent"].clone();
+        let p = &r["preflight"];
+        assert_eq!(p["fit"], "wont_fit", "{r:#}");
+        assert_eq!(p["resolution"], "4K");
+        assert_eq!(p["duration_s"], 3600.0);
+        assert!(
+            p["sentence"].as_str().unwrap().starts_with("At 4K this job needs ~15.5 GB of VRAM; 14.2 GB is free."),
+            "{}",
+            p["sentence"]
+        );
+        assert!(p["hog_note"].as_str().unwrap().starts_with("chrome.exe holds 1.2 GB"));
+        // at 1080p there is no history
+        let r = call(&mut f, json!({ "name": "demo4k", "resolution": "1080p" }))["structuredContent"].clone();
+        assert_eq!(r["preflight"]["fit"], "unknown");
+        // running: the published check is returned as is
+        let mut s = status;
+        s["render"] = json!({ "job": "demo4k try 3", "resolution": "4K" });
+        s["preflight"] = json!({ "job": "demo4k try 3", "resolution": "4K", "fit": "tight", "sentence": "published" });
+        f.status = Some(s);
+        assert_eq!(call(&mut f, json!({}))["structuredContent"]["preflight"]["sentence"], "published");
+        assert_eq!(call(&mut f, json!({ "name": "Demo4K try 3" }))["structuredContent"]["preflight"]["sentence"], "published");
+        // asked about something else while it runs: computed, with the running job's hints when it is the same job
+        let r = call(&mut f, json!({ "name": "demo4k", "frames": 240 }))["structuredContent"].clone();
+        assert_eq!(r["preflight"]["resolution"], "4K");
+        assert!(r["note"].as_str().unwrap().contains("already running"));
+        // the switch
+        f.on = false;
+        assert_eq!(call(&mut f, json!({}))["isError"], true);
     }
 
     #[test]

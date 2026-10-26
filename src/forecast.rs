@@ -3,7 +3,7 @@
 //! card would fill up soon. Also flags idle VRAM hogs: background apps (browsers, chat, launchers)
 //! holding a lot of video memory without using the GPU.
 use crate::telemetry::Sample;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 
 /// Seconds of history the trend looks at.
@@ -70,7 +70,7 @@ pub fn theil_sen(pts: &[(f64, f64)], max_pts: usize) -> Option<Trend> {
     Some(Trend { slope_mbs: m, agreement: same as f64 / slopes.len() as f64, points: p.len() })
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Hog {
     pub name: String,
     pub category: String,

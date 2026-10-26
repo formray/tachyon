@@ -44,6 +44,7 @@ fn status_raw(snap: &Snapshot, source: &str) -> Value {
             "job": r.job, "stage": r.stage, "fps": r.fps,
             "frame": r.progress.as_ref().map(|p| p.frame), "total_frames": r.progress.as_ref().and_then(|p| p.total),
             "elapsed_s": r.job_elapsed, "estimated_total_s": r.job_est_total,
+            "project": r.hints.project, "resolution": r.hints.resolution,
         })
     });
     let report = i.report.as_ref().map(|r| {
@@ -51,7 +52,6 @@ fn status_raw(snap: &Snapshot, source: &str) -> Value {
             "cause": r.cause, "headline": r.headline, "just_before": r.just_before,
             "stopped_ms": r.stopped_ms, "new": i.report_new,
             "probable_cause": r.diagnosis.as_ref().map(|d| d.sentence.clone()),
-
         })
     });
     json!({
@@ -66,6 +66,8 @@ fn status_raw(snap: &Snapshot, source: &str) -> Value {
         "vram_forecast": i.forecast,
         "idle_vram_note": i.forecast.hog_sentence(),
         "render": render,
+        "preflight": i.preflight,
+
         "job": i.live_job,
         "last_job": i.last_job,
         "crash_report": report,
