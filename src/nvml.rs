@@ -26,6 +26,29 @@ struct Mem {
     free: c_ulonglong,
     used: c_ulonglong,
 }
+/// nvmlMemory_v2_t: like `Mem`, but `used` leaves out the memory the driver reserves for itself.
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+struct MemV2 {
+    version: c_uint,
+    total: c_ulonglong,
+    reserved: c_ulonglong,
+    free: c_ulonglong,
+    used: c_ulonglong,
+}
+/// NVML_STRUCT_VERSION(Memory, 2): the struct size with the version in the top byte.
+const MEM_V2_VERSION: c_uint = std::mem::size_of::<MemV2>() as c_uint | (2 << 24);
+const MIB: f64 = 1048576.0;
+
+/// (used, total) in MiB, the way `nvidia-smi` shows them. The v1 call counts the driver's
+/// reserved memory (about 300 MiB on a 16 GB card) as used; v2 does not, so it is preferred.
+fn vram_mib(v2: Option<MemV2>, v1: Option<Mem>) -> Option<(f64, f64)> {
+    match (v2, v1) {
+        (Some(m), _) => Some((m.used as f64 / MIB, m.total as f64 / MIB)),
+        (None, Some(m)) => Some((m.used as f64 / MIB, m.total as f64 / MIB)),
+        _ => None,
+    }
+}
 /// nvmlProcessInfo_t (v2/v3 layout).
 #[repr(C)]
 #[derive(Default, Clone, Copy)]
@@ -61,6 +84,7 @@ type FnStr = unsafe extern "C" fn(*mut c_char, c_uint) -> Ret;
 type FnDevStr = unsafe extern "C" fn(Dev, *mut c_char, c_uint) -> Ret;
 type FnUtil = unsafe extern "C" fn(Dev, *mut Util) -> Ret;
 type FnMem = unsafe extern "C" fn(Dev, *mut Mem) -> Ret;
+type FnMemV2 = unsafe extern "C" fn(Dev, *mut MemV2) -> Ret;
 type FnU32 = unsafe extern "C" fn(Dev, *mut c_uint) -> Ret;
 type FnArgU32 = unsafe extern "C" fn(Dev, c_uint, *mut c_uint) -> Ret;
 type FnU64 = unsafe extern "C" fn(Dev, *mut c_ulonglong) -> Ret;
@@ -79,6 +103,7 @@ struct Api {
     name: Option<FnDevStr>,
     util: Option<FnUtil>,
     mem: Option<FnMem>,
+    mem_v2: Option<FnMemV2>,
     temp: Option<FnArgU32>,
     power: Option<FnU32>,
     power_limit: Option<FnU32>,
@@ -227,6 +252,7 @@ impl Nvml {
             name: sym!("nvmlDeviceGetName"),
             util: sym!("nvmlDeviceGetUtilizationRates"),
             mem: sym!("nvmlDeviceGetMemoryInfo"),
+            mem_v2: sym!("nvmlDeviceGetMemoryInfo_v2"),
             temp: sym!("nvmlDeviceGetTemperature"),
             power: sym!("nvmlDeviceGetPowerUsage"),
             power_limit: sym!("nvmlDeviceGetEnforcedPowerLimit"),
@@ -331,12 +357,25 @@ impl Nvml {
                     s.mem_ctrl_pct = Some(u.memory);
                 }
             }
-            if let Some(f) = a.mem {
+            let mut v2 = None;
+            if let Some(f) = a.mem_v2 {
+                let mut m = MemV2 { version: MEM_V2_VERSION, ..Default::default() };
+                if self.try_call(idx, "mem2", || f(d, &mut m)) {
+                    v2 = Some(m);
+                }
+            }
+            let mut v1 = None;
+            if v2.is_none()
+                && let Some(f) = a.mem
+            {
                 let mut m = Mem::default();
                 if self.try_call(idx, "mem", || f(d, &mut m)) {
-                    s.vram_used_mb = Some(m.used as f64 / 1048576.0);
-                    s.vram_total_mb = Some(m.total as f64 / 1048576.0);
+                    v1 = Some(m);
                 }
+            }
+            if let Some((u, t)) = vram_mib(v2, v1) {
+                s.vram_used_mb = Some(u);
+                s.vram_total_mb = Some(t);
             }
             if let Some(f) = a.temp {
                 let mut t = 0;
@@ -577,5 +616,19 @@ mod tests {
         assert_eq!(std::mem::size_of::<ProcV1>(), 16);
         assert_eq!(std::mem::size_of::<ProcUtil>(), 32);
         assert_eq!(std::mem::size_of::<Mem>(), 24);
+        assert_eq!(std::mem::size_of::<MemV2>(), 40);
+        assert_eq!(MEM_V2_VERSION, 0x0200_0028);
+    }
+    #[test]
+    fn vram_used_matches_nvidia_smi_not_counting_reserved_memory() {
+        // RTX 5080 at idle, as nvidia-smi showed it: total 16303, reserved 326, used 1270 MiB.
+        // The v1 call reports used = 1596 (used + reserved), the 300 MB that looked like a bug.
+        let mib = |x: u64| x << 20;
+        let v2 = MemV2 { version: MEM_V2_VERSION, total: mib(16303), reserved: mib(326), used: mib(1270), free: mib(14707) };
+        let v1 = Mem { total: mib(16303), used: mib(1596), free: mib(14707) };
+        assert_eq!(vram_mib(Some(v2), Some(v1)), Some((1270.0, 16303.0)));
+        // older drivers without _v2 keep the v1 figure
+        assert_eq!(vram_mib(None, Some(v1)), Some((1596.0, 16303.0)));
+        assert_eq!(vram_mib(None, None), None);
     }
 }

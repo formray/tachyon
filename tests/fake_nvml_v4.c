@@ -33,6 +33,10 @@ EXP int nvmlDeviceGetUtilizationRates(void*d,U*u){double t=T(); int s=sc();
 EXP int nvmlDeviceGetTemperature(void*d,unsigned s_,unsigned*t){int s=sc(); *t = s==3?45 : s==5?(unsigned)(87+sin(T())) : s==4?76 : (unsigned)(78+3.5*sin(T()/9));return 0;}
 EXP int nvmlDeviceGetMemoryInfo(void*d,M*m){m->total=16303ULL<<20; double u = sc()==2 ? 8000+ramp_mb() : 11134+900*sin(T()/7); if(u>16250) u=16250;
   m->used=(unsigned long long)(u*1048576.0);m->free=m->total-m->used;return 0;}
+/* _v2 (nvidia-smi's call): `used` without the 326 MiB the driver reserves; v1 above counts it as used */
+typedef struct { unsigned version; unsigned long long total, reserved, free, used; } M2;
+EXP int nvmlDeviceGetMemoryInfo_v2(void*d,M2*m){ M v; nvmlDeviceGetMemoryInfo(d,&v); if(m->version!=(40u|(2u<<24))) return 2;
+  m->total=v.total; m->reserved=326ULL<<20; m->used = v.used>m->reserved ? v.used-m->reserved : 0; m->free=v.free; return 0;}
 EXP int nvmlDeviceGetPowerUsage(void*d,unsigned*p){int s=sc(); *p = s==3?40000 : (s==4||s==5)?(unsigned)(354000+3000*sin(T())) : (unsigned)(300000+45000*sin(T()/3));return 0;}
 /* energy since driver load, mJ: about 300 W since the fake started */
 EXP int nvmlDeviceGetTotalEnergyConsumption(void*d,unsigned long long*e){ *e = 5000000000ULL + (unsigned long long)(T()*300000.0); return 0;}

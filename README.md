@@ -339,6 +339,10 @@ under wine.
 - The **hot state** redraws at 3 fps for as long as the card stays at or
   above `temp_amber_c`.
 - The **panel** sizes itself to its content; it cannot be resized.
+- **VRAM figures** are MiB (1024 × 1024 bytes), labelled MB, and "used" is the same
+  number `nvidia-smi` shows: it leaves out the memory the driver reserves for itself
+  (about 300 MiB on a 16 GB card). Drivers without `nvmlDeviceGetMemoryInfo_v2` only
+  report used + reserved, so there Tachyon reads that much higher.
 - **Per-process VRAM:** under WDDM the driver often reports none ("—").
   Per-process SM/ENC/DEC needs driver support.
 
