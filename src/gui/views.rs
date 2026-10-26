@@ -2,6 +2,7 @@
 //! banner, last job) and the two extra views, the crash report and the job history.
 use super::*;
 use tachyon::history::{JobKind, JobRecord, fmt_duration};
+use tachyon::preflight::Fit;
 use tachyon::report::{Cause, gb};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -150,7 +151,30 @@ impl App {
             }
             y += 6.0;
         }
-        let vram_note = i.forecast.warning.clone().map(|t| (t, T_RED)).or_else(|| i.forecast.hog_sentence().map(|t| (t, TEXT2)));
+        // the pre-render check: the verdict when it matters, a short line when the job should fit
+        if let Some(p) = i.preflight.as_ref().filter(|p| p.fit != Fit::Unknown) {
+            let (text, c, rows) = match p.fit {
+                Fit::WontFit => (p.sentence.clone(), T_RED, 3),
+                Fit::Tight => (p.sentence.clone(), T_AMBER, 3),
+                _ => (p.short_line(), TEXT2, 1),
+            };
+            for row in wrap_g(g, &text, Face::SansSemi, 12.0, w, rows) {
+                g.text(&row, x0, y + 13.0, Face::SansSemi, 12.0, c, H::L, V::Base);
+                y += 16.0;
+            }
+            if let Some(h) = p.hog_note.as_ref().filter(|_| p.fit != Fit::Fits) {
+                for row in wrap_g(g, h, Face::Sans, 11.5, w, 2) {
+                    g.text(&row, x0, y + 13.0, Face::Sans, 11.5, TEXT2, H::L, V::Base);
+                    y += 15.0;
+                }
+            }
+            y += 6.0;
+        }
+        // an idle-hog note is already part of the check when it warns
+        let pf_hogs = i.preflight.as_ref().is_some_and(|p| p.hog_note.is_some() && p.fit != Fit::Fits);
+        let vram_note =
+            i.forecast.warning.clone().map(|t| (t, T_RED)).or_else(|| i.forecast.hog_sentence().filter(|_| !pf_hogs).map(|t| (t, TEXT2)));
+
         if let Some((t, c)) = vram_note {
             for row in wrap_g(g, &t, Face::SansSemi, 12.0, w, 2) {
                 g.text(&row, x0, y + 13.0, Face::SansSemi, 12.0, c, H::L, V::Base);

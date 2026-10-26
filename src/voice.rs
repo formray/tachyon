@@ -5,6 +5,7 @@ use crate::config::{Config, Level};
 use crate::monitor::Snapshot;
 use crate::nvml::throttle_words;
 use crate::parse;
+use crate::preflight::{Fit, Preflight};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tone {
@@ -86,6 +87,7 @@ pub fn lines(snap: &Snapshot, cfg: &Config, now: chrono::DateTime<chrono::Local>
                 v.push(w(&format!("GPU {util}%{deg}. "), Tone::Plain));
                 // no "All good." when a VRAM warning follows
                 let vram_ok = snap.insights.forecast.warning.is_none()
+                    && snap.insights.preflight.as_ref().is_none_or(|p| !matches!(p.fit, Fit::WontFit | Fit::Tight))
                     && g.vram_used_mb.zip(g.vram_total_mb).is_none_or(|(u, t)| cfg.gpu.vram_level(u as f32, t as f32) == Level::Ok);
                 if power_cap {
                     v.push(w("Power cap active.", Tone::Quiet));
@@ -100,6 +102,12 @@ pub fn lines(snap: &Snapshot, cfg: &Config, now: chrono::DateTime<chrono::Local>
     // VRAM: a confident "full soon" warning first, then a tight card (with an idle hog if any)
     if let Some(wn) = &ins.forecast.warning {
         out.push(Line { words: vec![w(wn, Tone::Hot)], render: false });
+        out.truncate(3);
+        return out;
+    }
+    // the pre-render check, when the job will likely not fit (or only just)
+    if let Some(p) = ins.preflight.as_ref().filter(|p| matches!(p.fit, Fit::WontFit | Fit::Tight)) {
+        out.push(preflight_line(p));
         out.truncate(3);
         return out;
     }
@@ -181,6 +189,31 @@ pub fn why_lines(v: Option<&crate::explain::Verdict>) -> Vec<Line> {
     }
     out.truncate(3);
     out
+}
+
+/// The pre-render check in one line: "4K: needs ~15.9 GB, 14.6 GB free. Likely out of memory."
+fn preflight_line(p: &Preflight) -> Line {
+    let at = p.resolution.as_ref().map(|r| format!("{r}: ")).unwrap_or_default();
+    let (Some(n), Some(f)) = (p.need_mb, p.free_mb) else {
+        return Line { words: vec![(first_sentence(&p.sentence).to_string(), Tone::Warm)], render: false };
+    };
+    let (tail, tone) = if p.fit == Fit::WontFit { ("Likely out of memory.", Tone::Hot) } else { ("Tight.", Tone::Warm) };
+    Line {
+        words: vec![(format!("{at}needs ~{} GB, {} GB free. ", gb(n as f64), gb(f as f64)), tone), (tail.to_string(), Tone::Quiet)],
+        render: false,
+    }
+}
+
+/// Hex speaks up, once per job, when the pre-render check says it will likely run out of memory:
+/// the verdict, what closing idle apps would free (or what it rests on).
+pub fn preflight_lines(p: &Preflight) -> Vec<Line> {
+    let mut v = vec![Line { words: vec![(p.job.clone(), Tone::Name), (": will it fit?".into(), Tone::Quiet)], render: false }];
+    v.push(Line { words: vec![(first_sentence(&p.sentence).trim_end().to_string(), Tone::Hot)], render: false });
+    let tail = p.hog_note.clone().unwrap_or_else(|| {
+        format!("From {} past run{} ({} confidence).", p.matches, if p.matches == 1 { "" } else { "s" }, p.confidence_word)
+    });
+    v.push(Line { words: vec![(tail, Tone::Quiet)], render: false });
+    v
 }
 
 /// The one-time crash announcement: what happened, the probable cause (when there is one)
@@ -268,6 +301,56 @@ mod tests {
             process: Some("ffmpeg.exe (Video)".into()),
             evidence: vec!["GPU 41% · decoder 93% · encoder 0%".into()],
         }
+    }
+
+    fn pf(fit: Fit) -> Preflight {
+        Preflight {
+            job: "demo4k try 3".into(),
+            resolution: Some("4K".into()),
+            fit,
+            confidence: 0.86,
+            confidence_word: "high",
+            sentence:
+                "At 4K this job needs ~15.9 GB of VRAM; 14.6 GB is free. Likely out of memory, or very slow. Expected to take ~30 min."
+                    .into(),
+            evidence: vec![],
+            need_mb: Some(15.9 * 1024.0),
+            need_high_mb: None,
+            predicted_mb: None,
+            free_mb: Some(14.6 * 1024.0),
+            total_mb: Some(16376.0),
+            duration_s: Some(1800.0),
+            matches: 3,
+            hog_note: None,
+        }
+    }
+
+    #[test]
+    fn preflight_line_and_announcement() {
+        let cfg = Config::default();
+        let now = chrono::Local::now();
+        let mut s = snap(64, 30, 1800.0);
+        s.insights.preflight = Some(pf(Fit::WontFit));
+        let l = lines(&s, &cfg, now);
+        assert_eq!(l[0].text(), "GPU 30% · 64 °C. ", "no 'All good.' above the warning");
+        assert_eq!(l[1].text(), "4K: needs ~15.9 GB, 14.6 GB free. Likely out of memory.");
+        assert_eq!(l[1].words[0].1, Tone::Hot);
+        s.insights.preflight = Some(pf(Fit::Tight));
+        assert_eq!(lines(&s, &cfg, now)[1].text(), "4K: needs ~15.9 GB, 14.6 GB free. Tight.");
+        s.insights.preflight = Some(pf(Fit::Fits));
+        assert_eq!(lines(&s, &cfg, now)[0].text(), "GPU 30% · 64 °C. All good.");
+        let a: Vec<String> = preflight_lines(&pf(Fit::WontFit)).iter().map(|l| l.text()).collect();
+        assert_eq!(
+            a,
+            [
+                "demo4k try 3: will it fit?",
+                "At 4K this job needs ~15.9 GB of VRAM; 14.6 GB is free.",
+                "From 3 past runs (high confidence)."
+            ]
+        );
+        let mut h = pf(Fit::WontFit);
+        h.hog_note = Some("chrome.exe holds 1.2 GB without using the GPU: closing it would leave 15.8 GB free.".into());
+        assert!(preflight_lines(&h)[2].text().starts_with("chrome.exe holds"));
     }
 
     #[test]

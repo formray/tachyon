@@ -107,6 +107,7 @@ pub(super) enum Link {
 pub(super) enum Special {
     Announce,
     Why,
+    Preflight,
 }
 
 /// True when a fullscreen app (game, video, presentation) is in front on the sprite's monitor.
@@ -499,6 +500,7 @@ impl Companion {
         let (left_link, right_link) = match self.b_special.as_ref().map(|s| s.0) {
             Some(Special::Announce) => (None, (Link::Report, "Open report ›")),
             Some(Special::Why) => (Some((Link::Back, "‹ Back")), (Link::Panel, "Open panel ›")),
+            Some(Special::Preflight) => (None, (Link::Panel, "Open panel ›")),
             None => (asks_why(ctx.snap).then_some((Link::Why, "Why is it slow? ›")), (Link::Panel, "Open panel ›")),
         };
         let footer = bubble_footer(ctx.snap).or_else(|| self.b_special.as_ref().map(|_| String::new()));
@@ -1031,11 +1033,24 @@ impl App {
         self.s.engine.mark_announced(&mut self.s.snap.insights);
     }
 
+    /// Hex warns, once per job, that the render about to run will likely not fit in VRAM.
+    fn hex_preflight(&mut self) {
+        let Some(p) = self.s.snap.insights.preflight.clone() else { return };
+        self.bubble_special(Some((Special::Preflight, tachyon::voice::preflight_lines(&p))));
+        if let Some(c) = self.comp.as_mut() {
+            c.b_last_hover = Instant::now() + Duration::from_secs(20);
+        }
+        self.s.engine.mark_preflight_told(&mut self.s.snap.insights);
+    }
+
     /// Poll tick in companion mode: sprite state/colours, and the bubble while it is open.
     pub(super) fn hex_poll(&mut self) {
         if self.s.snap.insights.report_new && self.cfg.hex_announce {
             self.hex_announce();
+        } else if self.s.snap.insights.preflight_new && self.cfg.hex_announce {
+            self.hex_preflight();
         }
+
         let now = self.now_ms();
         let dump = self.dump.clone();
         let (c, mut ctx) = self.bubble_ctx_parts();
