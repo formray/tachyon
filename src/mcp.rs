@@ -75,6 +75,12 @@ pub fn tools() -> Value {
             json!({ "n": { "type": "integer", "description": "How many jobs (1-100, default 10), newest last.", "minimum": 1, "maximum": 100 } })
         ),
         tool(
+            "diagnose_crash",
+            "Why did it crash?",
+            "The probable causes of the last unexpected restart or GPU driver failure, ranked with a rough percentage: unstable RAM or EXPO/XMP, GPU overclock, power or PSU, overheating, driver timeout (TDR) or an application bug. Each with the evidence (bug check codes, NVIDIA driver resets, GPU timeout reports, WHEA errors, temperatures, power, clock offsets, memory speed) and one piece of advice. Estimates, never certain; Tachyon changes no settings.",
+            json!({})
+        ),
+        tool(
             "compare_last_run",
             "Compare with last time",
             "Compares the latest job (or the latest job whose name contains `name`) with the previous run of the same job.",
@@ -156,6 +162,47 @@ fn call(name: &str, args: &Value, src: &mut dyn Source) -> Result<Value, String>
             let jobs = src.history(n);
             Ok(json!({ "jobs": jobs, "count": jobs.len() }))
         }
+        "diagnose_crash" => {
+            let Some(r) = src.report() else {
+                return Ok(
+                    json!({ "diagnosis": null, "note": "No crash report: Tachyon has not seen an unexpected restart or stop yet (it needs blackbox = true)." }),
+                );
+            };
+            let (d, recomputed) = match r.diagnosis.clone() {
+                Some(d) => (Some(d), false),
+                None => {
+                    // a report from 1.0: work it out from what the report kept
+                    let ctx = crate::diagnose::Context { ram: crate::sysinfo::ram_speed(), ..Default::default() };
+                    let ev: Vec<_> = r.events.iter().map(|e| e.event.clone()).collect();
+                    (
+                        crate::diagnose::diagnose(
+                            r.cause,
+                            &ev,
+                            r.events_note.is_none(),
+                            &r.peaks_last_minute,
+                            &[],
+                            r.vram_holder.as_ref(),
+                            &ctx,
+                        ),
+                        true,
+                    )
+                }
+            };
+            let mut v = json!({
+                "headline": r.headline,
+                "stopped_ms": r.stopped_ms,
+                "cause": r.cause,
+                "diagnosis": d,
+                "events": r.events.iter().map(|e| e.text.clone()).collect::<Vec<_>>(),
+                "just_before": r.just_before,
+            });
+            if d.is_none() {
+                v["note"] = json!("Tachyon stopped without closing, but Windows logged nothing that points to a system problem.");
+            } else if recomputed {
+                v["note"] = json!("Worked out now from an older report, without the GPU overclock reading from before the crash.");
+            }
+            Ok(v)
+        }
         "compare_last_run" => {
             let filter = args["name"].as_str().map(str::to_lowercase);
             let jobs = src.history(2000);
@@ -198,7 +245,7 @@ pub fn handle(msg: &Value, src: &mut dyn Source) -> Option<Value> {
                     "protocolVersion": v,
                     "capabilities": { "tools": { "listChanged": false } },
                     "serverInfo": { "name": "tachyon", "title": "Tachyon GPU monitor", "version": env!("CARGO_PKG_VERSION") },
-                    "instructions": "Read-only view of this PC's NVIDIA GPU from Tachyon. Use get_bottleneck to explain slowness, get_vram_forecast before loading large models, get_blackbox after a crash, get_history and compare_last_run for render jobs.",
+                    "instructions": "Read-only view of this PC's NVIDIA GPU from Tachyon. Use get_bottleneck to explain slowness, get_vram_forecast before loading large models, get_blackbox and diagnose_crash after a crash, get_history and compare_last_run for render jobs.",
                 }),
             )
         }
@@ -419,9 +466,11 @@ mod tests {
     use super::*;
     use crate::telemetry::Sample;
 
+    #[derive(Default)]
     struct Fake {
         on: bool,
         jobs: Vec<JobRecord>,
+        report: Option<report::Report>,
     }
 
     impl Source for Fake {
@@ -436,7 +485,7 @@ mod tests {
             (0..600).map(|i| Sample { t_ms: now - (600 - i) * 1000, util: Some(90), ..Default::default() }).collect()
         }
         fn report(&mut self) -> Option<report::Report> {
-            None
+            self.report.clone()
         }
         fn history(&mut self, n: usize) -> Vec<JobRecord> {
             let k = self.jobs.len().saturating_sub(n);
@@ -459,7 +508,7 @@ mod tests {
 
     #[test]
     fn handshake_and_tool_list() {
-        let mut f = Fake { on: true, jobs: vec![] };
+        let mut f = Fake { on: true, ..Default::default() };
         let r = rpc(
             &mut f,
             1,
@@ -475,7 +524,16 @@ mod tests {
         let names: Vec<&str> = r["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(
             names,
-            ["get_status", "get_bottleneck", "get_vram_forecast", "get_processes", "get_blackbox", "get_history", "compare_last_run"]
+            [
+                "get_status",
+                "get_bottleneck",
+                "get_vram_forecast",
+                "get_processes",
+                "get_blackbox",
+                "get_history",
+                "diagnose_crash",
+                "compare_last_run"
+            ]
         );
         assert!(r["result"]["tools"].as_array().unwrap().iter().all(|t| t["annotations"]["readOnlyHint"] == true));
         assert_eq!(rpc(&mut f, 3, "ping", json!({}))["result"], json!({}));
@@ -487,6 +545,7 @@ mod tests {
         let mut f = Fake {
             on: true,
             jobs: vec![job("Shot 12 try 1", 0, 1000.0), job("Other", 2_000_000, 50.0), job("Shot 12 try 2", 3_000_000, 1140.0)],
+            ..Default::default()
         };
         let call =
             |f: &mut Fake, name: &str, args: Value| rpc(f, 9, "tools/call", json!({ "name": name, "arguments": args }))["result"].clone();
@@ -514,8 +573,52 @@ mod tests {
         assert!(r["content"][0]["text"].as_str().unwrap().contains("agent_api = true"));
     }
 
+    #[test]
+    fn diagnose_crash_from_the_report() {
+        use crate::events::SysEvent;
+        use crate::recorder::{PrevSession, Session};
+        let call = |f: &mut Fake| rpc(f, 5, "tools/call", json!({ "name": "diagnose_crash", "arguments": {} }))["result"].clone();
+        let mut f = Fake { on: true, ..Default::default() };
+        assert!(call(&mut f)["structuredContent"]["note"].as_str().unwrap().starts_with("No crash report"));
+        let t0 = 1_790_000_040_000i64;
+        let prev = PrevSession {
+            session: Session { version: "1.0.1".into(), pid: 1, file: "a".into(), started_ms: t0, clean: false, ended_ms: None },
+            samples: (0..120)
+                .map(|i| Sample {
+                    t_ms: t0 + i * 1000,
+                    util: Some(97),
+                    temp: Some(66),
+                    power_w: Some(264.0),
+                    power_limit_w: Some(360.0),
+                    ..Default::default()
+                })
+                .collect(),
+        };
+        let stop = t0 + 119_000;
+        let ev = |dt: i64, p: &str, id: u32, code: Option<&str>| SysEvent {
+            t_ms: stop + dt,
+            provider: p.into(),
+            id,
+            level: 2,
+            code: code.map(str::to_string),
+        };
+        let events = vec![ev(-5000, "nvlddmkm", 153, None), ev(60_000, crate::events::KERNEL_POWER, 41, Some("0x0000001A"))];
+        let mut r = report::build(&prev, Some(stop + 30_000), Ok(events), stop + 90_000).unwrap();
+        assert!(r.diagnosis.is_some());
+        f.report = Some(r.clone());
+        let v = call(&mut f)["structuredContent"].clone();
+        assert_eq!(v["diagnosis"]["causes"][0]["suspect"], "ram", "{v:#}");
+        assert!(v["note"].is_null());
+        // a 1.0 report without a diagnosis: worked out from the report
+        r.diagnosis = None;
+        f.report = Some(r);
+        let v = call(&mut f)["structuredContent"].clone();
+        assert_eq!(v["diagnosis"]["causes"][0]["suspect"], "ram");
+        assert!(v["note"].as_str().unwrap().contains("older report"));
+    }
+
     fn serve_bytes(input: &[u8]) -> Vec<Value> {
-        let mut f = Fake { on: true, jobs: vec![job("a", 1, 60.0)] };
+        let mut f = Fake { on: true, jobs: vec![job("a", 1, 60.0)], ..Default::default() };
         let mut out = Vec::new();
         serve_io(std::io::Cursor::new(input.to_vec()), &mut out, &mut f);
         String::from_utf8(out).expect("replies are UTF-8").lines().map(|l| serde_json::from_str(l).expect("each reply is JSON")).collect()

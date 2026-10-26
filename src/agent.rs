@@ -50,6 +50,8 @@ fn status_raw(snap: &Snapshot, source: &str) -> Value {
         json!({
             "cause": r.cause, "headline": r.headline, "just_before": r.just_before,
             "stopped_ms": r.stopped_ms, "new": i.report_new,
+            "probable_cause": r.diagnosis.as_ref().map(|d| d.sentence.clone()),
+
         })
     });
     json!({
