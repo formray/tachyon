@@ -114,7 +114,14 @@ fn bump<K: PartialEq>(v: &mut Vec<(K, f64)>, k: K, by: f64) {
 
 impl Acc {
     fn new(s: &Sample) -> Self {
-        Acc { first_ms: s.t_ms, last_ms: s.t_ms, energy_first: s.energy_mj, energy_ok: true, ..Default::default() }
+        Acc {
+            first_ms: s.t_ms,
+            last_ms: s.t_ms,
+            energy_first: s.energy_mj,
+            energy_last: s.energy_mj,
+            energy_ok: true,
+            ..Default::default()
+        }
     }
 
     fn add(&mut self, s: &Sample, dt: f64, fps: Option<f64>, kind: Option<Kind>) {
@@ -637,5 +644,24 @@ mod tests {
         assert!(dir.join(OLD).exists());
         assert_eq!(recent(&dir, 10).len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn render_job_starting_quiet_keeps_the_energy_counter() {
+        // Real renders load for a few seconds first: the job's first sample is quiet, so the
+        // quiet tail is merged into an accumulator that has only seen that one sample.
+        let mut t = JobTracker::default();
+        let mut e = 1_000_000u64;
+        let mut out = vec![];
+        for i in 0..120 {
+            let util = if i < 5 { 2 } else { 80 };
+            e += 250_000;
+            out.extend(t.push(&s(i, util, 250.0, Some(e)), Some(("Shot 12", None)), None));
+        }
+        out.extend(t.end());
+        let r = &out[0];
+        assert_eq!(r.energy_source.as_deref(), Some("counter"), "{r:?}");
+        // 119 deltas of 250 J
+        assert!((r.energy_wh.unwrap() - 119.0 * 250.0 / 3600.0).abs() < 0.01, "{:?}", r.energy_wh);
     }
 }
