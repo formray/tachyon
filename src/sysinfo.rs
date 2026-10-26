@@ -148,9 +148,125 @@ pub struct RamSpeed {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub configured_mts: Option<u32>,
     pub modules: u32,
+    /// The first module's part number (SMBIOS), e.g. "CMK32GX5M2B6000Z30".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part: Option<String>,
+}
+
+/// How the memory speed compares with what the modules are made for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RamState {
+    /// At (or below) the standard JEDEC speed.
+    Standard,
+    /// An EXPO/XMP profile at or below the kit's rated profile speed.
+    Profile,
+    /// Faster than the kit's rated EXPO/XMP speed: an overclock beyond its rating.
+    BeyondRating,
+    /// Faster than the standard speed, kit rating unknown (EXPO/XMP or a manual overclock).
+    AboveStandard,
+}
+
+fn digits_after(s: &str, prefix_end: usize, n: usize) -> Option<u32> {
+    let d = s.get(prefix_end..prefix_end + n)?;
+    d.chars().all(|c| c.is_ascii_digit()).then(|| d.parse().ok()).flatten()
+}
+
+/// The EXPO/XMP speed (MT/s) a kit is sold for, decoded from common part numbers:
+/// Corsair `CMK32GX5M2B6000Z30` (6000), G.Skill `F5-6000J3038F16GX2` (6000),
+/// Kingston Fury `KF560C36BBEK2-32` (6000), Crucial / Ballistix `CP2K16G60C40U5` (6000),
+/// TeamGroup `FF3D532G6000HC38A` (6000). None when the scheme is unknown.
+pub fn kit_speed(part: &str) -> Option<u32> {
+    let p = part.trim().to_ascii_uppercase();
+    let plausible = |v: u32| (1600..=12000).contains(&v).then_some(v);
+    // Corsair: CM<series><size>GX<gen>M<n><letter><speed>...
+    if p.starts_with("CM")
+        && let Some(i) = p.find("GX")
+        && let Some(m) = p[i..].find('M').map(|m| i + m)
+    {
+        return digits_after(&p, m + 3, 4).and_then(plausible);
+    }
+    // G.Skill: F4-3600C16D-..., F5-6000J3038F16GX2-...
+    if p.starts_with("F4-") || p.starts_with("F5-") {
+        return digits_after(&p, 3, 4).and_then(plausible);
+    }
+    // Kingston Fury: KF<gen><speed/100>C..., e.g. KF560C36BBEK2-32 (DDR5-6000), KF432C16BB (DDR4-3200)
+    if p.starts_with("KF") && p.as_bytes().get(5) == Some(&b'C') {
+        return digits_after(&p, 3, 2).map(|v| v * 100).and_then(plausible);
+    }
+    // Crucial / Ballistix: CP2K16G60C40U5, BL2K16G36C16U4B: <size>G<speed/100>C
+    if (p.starts_with("CP") || p.starts_with("BL"))
+        && let Some(g) = p.find('G')
+        && p.as_bytes().get(g + 3) == Some(&b'C')
+    {
+        return digits_after(&p, g + 1, 2).map(|v| v * 100).and_then(plausible);
+    }
+    // TeamGroup: FF3D532G6000HC38A..., TF13D416G3600HC18J...: <size>G<speed>HC
+    if (p.starts_with("FF") || p.starts_with("TF") || p.starts_with("TL"))
+        && let Some(h) = p.find("HC")
+        && h >= 4
+    {
+        return digits_after(&p, h - 4, 4).and_then(plausible);
+    }
+    None
+}
+
+/// Modules in one retail kit from the part number (Corsair `M2`, G.Skill `GX2`, Kingston `K2`, Crucial `2K`).
+pub fn kit_modules(part: &str) -> Option<u32> {
+    let p = part.trim().to_ascii_uppercase();
+    let after = |pat: &str| p.find(pat).and_then(|i| p[i + pat.len()..].chars().next()).and_then(|c| c.to_digit(10));
+    if p.starts_with("CM") {
+        return p.find("GX").and_then(|i| p[i..].find('M').map(|m| i + m + 1)).and_then(|j| p[j..].chars().next()?.to_digit(10));
+    }
+    if p.starts_with("F4-") || p.starts_with("F5-") {
+        return after("GX");
+    }
+    if p.starts_with("KF") {
+        let b = p.as_bytes();
+        let kit = (3..b.len().saturating_sub(1)).find(|&i| b[i] == b'K' && b[i + 1].is_ascii_digit()).map(|i| (b[i + 1] - b'0') as u32);
+        return kit.or(Some(1));
+    }
+    if p.starts_with("CP") || p.starts_with("BL") {
+        let b = p.as_bytes();
+        return match (b.get(2), b.get(3)) {
+            (Some(d), Some(b'K')) if d.is_ascii_digit() => Some((d - b'0') as u32),
+            _ => Some(1),
+        };
+    }
+    None
 }
 
 impl RamSpeed {
+    /// The kit's rated EXPO/XMP speed, when its part number tells.
+    pub fn kit_mts(&self) -> Option<u32> {
+        self.part.as_deref().and_then(kit_speed)
+    }
+
+    pub fn state(&self) -> RamState {
+        let Some(c) = self.configured_mts else { return RamState::Standard };
+        match self.kit_mts() {
+            Some(k) if c > k + 100 => RamState::BeyondRating,
+            Some(_) if self.above_rated() || (self.rated_mts.is_none() && self.above_cpu_spec()) => RamState::Profile,
+            Some(_) => RamState::Standard,
+            None if self.above_rated() || self.above_cpu_spec() => RamState::AboveStandard,
+            None => RamState::Standard,
+        }
+    }
+
+    /// Two DIMMs per channel (four DDR5 modules) faster than most CPUs officially support that
+    /// way, and whether they are two retail kits combined.
+    pub fn crowded(&self) -> Option<String> {
+        let c = self.configured_mts?;
+        if self.kind != "DDR5" || self.modules < 4 || c <= 5200 {
+            return None;
+        }
+        let kits = self.part.as_deref().and_then(kit_modules).filter(|k| *k > 0 && *k < self.modules).map(|k| self.modules / k);
+        let mixed = kits.filter(|n| *n > 1).map(|n| format!(", from {n} separate kits")).unwrap_or_default();
+        Some(format!(
+            "{} DDR5 modules at {c} MT/s{mixed}: with two modules per channel most CPUs are only specified for about 3600-5200 MT/s",
+            self.modules
+        ))
+    }
+
     /// The memory runs faster than its rated speed (EXPO/XMP or a manual overclock).
     pub fn above_rated(&self) -> bool {
         matches!((self.rated_mts, self.configured_mts), (Some(r), Some(c)) if c > r + 100)
@@ -191,6 +307,27 @@ fn mem_kind(t: u8) -> &'static str {
     }
 }
 
+/// String number `idx` (1-based) of the structure whose strings start at `from`.
+fn smbios_string(table: &[u8], from: usize, idx: u8) -> Option<String> {
+    if idx == 0 {
+        return None;
+    }
+    let mut k = 1;
+    let mut j = from;
+    while j < table.len() && table[j] != 0 {
+        let end = table[j..].iter().position(|b| *b == 0).map_or(table.len(), |e| j + e);
+        if k == idx {
+            return Some(String::from_utf8_lossy(&table[j..end]).into_owned());
+        }
+        k += 1;
+        j = end + 1;
+        if k > 64 {
+            break;
+        }
+    }
+    None
+}
+
 /// Parse the SMBIOS structure table (type 17 memory devices). Damaged tables give None or a
 /// partial answer, never a panic.
 pub fn parse_smbios(table: &[u8]) -> Option<RamSpeed> {
@@ -225,6 +362,11 @@ pub fn parse_smbios(table: &[u8]) -> Option<RamSpeed> {
                 .filter(|v| *v > 0 && *v < 100_000);
                 r.rated_mts = r.rated_mts.max(speed);
                 r.configured_mts = r.configured_mts.max(conf);
+                if r.part.is_none()
+                    && let Some(&idx) = s.get(0x1A)
+                {
+                    r.part = smbios_string(table, i + len, idx).map(|p| p.trim().to_string()).filter(|p| !p.is_empty() && p.is_ascii());
+                }
             }
         }
         if ty == 127 {
@@ -371,6 +513,10 @@ mod tests {
 
     /// One type 17 record: size 16 GB, DDR5, rated `speed`, configured `conf`.
     pub fn smbios_dimm(speed: u16, conf: u16) -> Vec<u8> {
+        smbios_dimm_part(speed, conf, "")
+    }
+
+    pub fn smbios_dimm_part(speed: u16, conf: u16, part: &str) -> Vec<u8> {
         let mut s = vec![0u8; 0x28];
         s[0] = 17;
         s[1] = 0x28;
@@ -378,8 +524,61 @@ mod tests {
         s[0x12] = 0x22;
         s[0x15..0x17].copy_from_slice(&speed.to_le_bytes());
         s[0x20..0x22].copy_from_slice(&conf.to_le_bytes());
-        s.extend_from_slice(b"DIMM A1\0Kingston\0\0");
+        // strings: 1 locator, 2 manufacturer, 3 part number (padded with spaces, as Corsair does)
+        if part.is_empty() {
+            s.extend_from_slice(b"DIMM A1\0Kingston\0\0");
+        } else {
+            s[0x1A] = 3;
+            s.extend_from_slice(format!("DIMM A1\0Corsair\0{part}   \0\0").as_bytes());
+        }
         s
+    }
+
+    #[test]
+    fn kit_part_numbers() {
+        for (p, v, n) in [
+            ("CMK32GX5M2B6000Z30", Some(6000), Some(2)),
+            ("CMH64GX5M4B5600C40", Some(5600), Some(4)),
+            ("CMK16GX4M2B3200C16", Some(3200), Some(2)),
+            ("F5-6000J3038F16GX2-TZ5RK", Some(6000), Some(2)),
+            ("F4-3600C16D-32GTZN", Some(3600), None),
+            ("KF560C36BBEK2-32", Some(6000), Some(2)),
+            ("KF432C16BB/16", Some(3200), Some(1)),
+            ("CP2K16G60C40U5", Some(6000), Some(2)),
+            ("BL2K16G36C16U4B", Some(3600), Some(2)),
+            ("FF3D532G6000HC38ADC01", Some(6000), None),
+            ("M425R2GA3BB0-CWMOD", None, None),
+            ("", None, None),
+            ("CMK", None, None),
+        ] {
+            assert_eq!((kit_speed(p), kit_modules(p)), (v, n), "{p}");
+        }
+    }
+
+    #[test]
+    fn expo_profile_vs_beyond_rating() {
+        let st = |rated, conf, part: &str| {
+            let mut t = vec![];
+            for _ in 0..4 {
+                t.extend(smbios_dimm_part(rated, conf, part));
+            }
+            parse_smbios(&t).unwrap()
+        };
+        // Giuseppe's PC: 4 x CMK32GX5M2B6000Z30 (two 2-module kits), now 5600; at 6000 on the crash day
+        let now = st(4800, 5600, "CMK32GX5M2B6000Z30");
+        assert_eq!(now.part.as_deref(), Some("CMK32GX5M2B6000Z30"));
+        assert_eq!((now.kit_mts(), now.state()), (Some(6000), RamState::Profile));
+        assert_eq!(st(4800, 6000, "CMK32GX5M2B6000Z30").state(), RamState::Profile, "at the rated EXPO speed");
+        assert_eq!(st(4800, 6400, "CMK32GX5M2B6000Z30").state(), RamState::BeyondRating);
+        assert_eq!(st(4800, 4800, "CMK32GX5M2B6000Z30").state(), RamState::Standard);
+        assert_eq!(st(4800, 6000, "").state(), RamState::AboveStandard, "no part number: rating unknown");
+        assert_eq!(
+            now.crowded().as_deref(),
+            Some(
+                "4 DDR5 modules at 5600 MT/s, from 2 separate kits: with two modules per channel most CPUs are only specified for about 3600-5200 MT/s"
+            )
+        );
+        assert_eq!(st(4800, 5200, "CMK32GX5M2B6000Z30").crowded(), None);
     }
 
     #[test]

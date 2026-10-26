@@ -9,7 +9,7 @@
 use crate::events::{APP_ERROR, KERNEL_POWER, LIVE_KERNEL, SysEvent, WHEA};
 use crate::nvml::OcInfo;
 use crate::report::{Cause, Holder, Peaks};
-use crate::sysinfo::RamSpeed;
+use crate::sysinfo::{RamSpeed, RamState};
 use crate::telemetry::Sample;
 use serde::{Deserialize, Serialize};
 
@@ -396,28 +396,41 @@ pub fn diagnose(
 
     // --- memory speed
     if let Some(r) = &ctx.ram {
-        let fast = if r.above_rated() {
-            b.add(
-                Suspect::Ram,
-                1.5,
-                &format!("the RAM runs at {} MT/s, above its rated {} (EXPO/XMP)", r.configured_mts.unwrap_or(0), r.rated_mts.unwrap_or(0)),
-            );
-            true
-        } else if r.above_cpu_spec() {
-            b.add(
-                Suspect::Ram,
-                1.0,
-                &format!("the RAM runs at {} MT/s, above the speed most CPUs officially support", r.configured_mts.unwrap_or(0)),
-            );
-            true
-        } else {
-            if let Some(c) = r.configured_mts {
-                normal.push(format!("The RAM runs at a standard speed ({} at {c} MT/s).", r.kind));
+        let c = r.configured_mts.unwrap_or(0);
+        let k = r.kit_mts().unwrap_or(0);
+        let std = r.rated_mts.map(|j| format!(", standard {j}")).unwrap_or_default();
+        // read now, after the restart: the BIOS settings may differ from the day of the crash
+        let fast = match r.state() {
+            RamState::BeyondRating => {
+                Some((1.5, 2.0, format!("the RAM runs at {c} MT/s now, faster than the kit's rated EXPO/XMP {k} (beyond its rating)")))
             }
-            false
+            RamState::Profile => Some((0.5, 1.0, format!("the RAM runs an EXPO/XMP profile: {c} MT/s now (kit rated {k}{std})"))),
+            RamState::AboveStandard => match r.rated_mts.filter(|j| c > j + 100) {
+                Some(j) => {
+                    Some((1.5, 2.0, format!("the RAM runs at {c} MT/s now, above its standard {j} (EXPO/XMP or a manual overclock)")))
+                }
+                None => Some((1.0, 1.5, format!("the RAM runs at {c} MT/s now, above the speed most CPUs officially support"))),
+            },
+            RamState::Standard => {
+                if c > 0 {
+                    normal.push(format!("The RAM runs at a standard speed now ({} at {c} MT/s).", r.kind));
+                }
+                None
+            }
         };
-        if fast && memory_evidence {
-            b.add(Suspect::Ram, 2.0, "memory-related errors together with a fast memory profile");
+        if let Some((w, wm, ev)) = fast {
+            b.add(Suspect::Ram, w, &ev);
+            if memory_evidence {
+                let why = if r.state() == RamState::BeyondRating {
+                    "memory-related errors with the RAM beyond its rated speed"
+                } else {
+                    "memory-related errors while a fast memory profile is in use"
+                };
+                b.add(Suspect::Ram, wm, why);
+            }
+        }
+        if let Some(cr) = r.crowded() {
+            b.add(Suspect::Ram, if memory_evidence { 1.0 } else { 0.5 }, &cr);
         }
     }
 
@@ -496,15 +509,25 @@ fn lower_first(s: &str) -> String {
 fn advice(s: Suspect, ctx: &Context, peaks: &Peaks, crashed: &[String]) -> String {
     match s {
         Suspect::Ram => {
-            let step = ctx.ram.as_ref().and_then(|r| r.configured_mts).filter(|_| ctx.ram.as_ref().is_some_and(|r| r.above_rated() || r.above_cpu_spec()));
-            match step {
-                Some(c) => format!(
-                    "Run the RAM one step slower in the BIOS (for example {c} → {} MT/s) or turn EXPO/XMP off for a test, then run a memory test (TestMem5, OCCT or MemTest86).",
+            const TEST: &str = "a memory test (TestMem5, OCCT or MemTest86)";
+            let Some(r) = ctx.ram.as_ref().filter(|r| r.configured_mts.is_some()) else {
+                return format!("Run {TEST}; if you use EXPO/XMP or a CPU overclock, try the BIOS defaults for a while.");
+            };
+            let c = r.configured_mts.unwrap_or(0);
+            let four = if r.crowded().is_some() { " Four modules are harder to run fast than two." } else { "" };
+            match r.state() {
+                RamState::BeyondRating => format!(
+                    "Set the RAM back to the kit's rated speed ({} MT/s) or lower in the BIOS, then run {TEST}.{four}",
+                    r.kit_mts().unwrap_or(0)
+                ),
+                RamState::Profile | RamState::AboveStandard => format!(
+                    "The RAM runs at {c} MT/s now; the settings may have changed since this crash. If you already lowered it and it has been stable since, no action is needed. Otherwise run {TEST}, and only if it finds errors try one step slower ({c} → {} MT/s) or EXPO/XMP off.{four}",
                     c.saturating_sub(400)
                 ),
-                None => "Run a memory test (TestMem5, OCCT or MemTest86); if you use EXPO/XMP or a CPU overclock, try the BIOS defaults for a while.".into(),
+                RamState::Standard => format!("The RAM runs at a standard speed ({c} MT/s), so run {TEST} to check the modules themselves."),
             }
         }
+
         Suspect::GpuOverclock => {
             "Put the GPU back to stock (in MSI Afterburner or similar: Reset), memory offset first, and see whether the crashes stop.".into()
         }
@@ -559,7 +582,7 @@ mod tests {
     }
 
     fn ram(rated: u32, conf: u32) -> RamSpeed {
-        RamSpeed { kind: "DDR5".into(), rated_mts: Some(rated), configured_mts: Some(conf), modules: 2 }
+        RamSpeed { kind: "DDR5".into(), rated_mts: Some(rated), configured_mts: Some(conf), modules: 2, part: None }
     }
 
     fn pct(d: &Diagnosis, s: Suspect) -> u8 {
@@ -568,6 +591,29 @@ mod tests {
 
     /// The case this was modelled on: nvlddmkm 153 resets, then a 0x1A blue screen with python.exe
     /// on the GPU; EXPO 6000 RAM (fixed at 5600) and an Afterburner memory overclock as runner-up.
+    /// Giuseppe's PC: a 6000 EXPO kit (4 modules from two kits) now at 5600, crash days earlier.
+    #[test]
+    fn expo_kit_at_or_below_its_rating_is_a_profile_not_an_overclock() {
+        let events = vec![ev(-300, "nvlddmkm", 153, None), ev(60, KERNEL_POWER, 41, Some("0x0000001A"))];
+        let kit = |conf| RamSpeed { modules: 4, part: Some("CMK32GX5M2B6000Z30".into()), ..ram(4800, conf) };
+        let ctx = Context { oc: None, oc_after: true, ram: Some(kit(5600)) };
+        let d = diagnose(Cause::Restart, &events, true, &peaks(92, 66, 264.0), &[], None, &ctx).unwrap();
+        let r = d.causes.iter().find(|c| c.suspect == Suspect::Ram).expect("ram");
+        let ev = r.evidence.join(" | ");
+        assert!(ev.contains("EXPO/XMP profile: 5600 MT/s now (kit rated 6000, standard 4800)"), "{ev}");
+        assert!(ev.contains("4 DDR5 modules at 5600 MT/s, from 2 separate kits"), "{ev}");
+        assert!(!ev.contains("above its") && !ev.contains("beyond"), "{ev}");
+        assert!(r.advice.contains("If you already lowered it and it has been stable since, no action is needed"), "{}", r.advice);
+        assert!(r.advice.contains("only if it finds errors try one step slower (5600 → 5200"), "{}", r.advice);
+        assert!(!r.advice.starts_with("Run the RAM one step slower"), "{}", r.advice);
+        // beyond the kit's rating: back to the rated speed
+        let ctx = Context { ram: Some(kit(6400)), ..ctx };
+        let d = diagnose(Cause::Restart, &events, true, &peaks(92, 66, 264.0), &[], None, &ctx).unwrap();
+        let r = d.causes.iter().find(|c| c.suspect == Suspect::Ram).expect("ram");
+        assert!(r.evidence.iter().any(|e| e.contains("faster than the kit's rated EXPO/XMP 6000")), "{:?}", r.evidence);
+        assert!(r.advice.starts_with("Set the RAM back to the kit's rated speed (6000 MT/s)"), "{}", r.advice);
+    }
+
     #[test]
     fn real_case_expo_ram_first_gpu_memory_oc_second() {
         let events = vec![
@@ -585,7 +631,7 @@ mod tests {
         assert_eq!(d.confidence, "likely");
         assert!(d.sentence.starts_with("Likely cause: unstable RAM or memory overclock (EXPO/XMP), about "), "{}", d.sentence);
         let ev0 = d.causes[0].evidence.join(" | ");
-        assert!(ev0.contains("0x1A (MEMORY_MANAGEMENT)") && ev0.contains("6000 MT/s, above its rated 4800"), "{ev0}");
+        assert!(ev0.contains("0x1A (MEMORY_MANAGEMENT)") && ev0.contains("6000 MT/s now, above its standard 4800"), "{ev0}");
         assert!(d.causes[0].advice.contains("6000 → 5600"), "{}", d.causes[0].advice);
         assert!(d.causes[1].evidence.iter().any(|e| e.contains("memory clock offset +1000")));
         assert!(d.normal.iter().any(|n| n.contains("normal (at most 66 °C)")));

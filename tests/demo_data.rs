@@ -182,7 +182,13 @@ fn write_demo_diagnosis() {
             rated_boost_mhz: Some(2617),
         }),
         oc_after: false,
-        ram: Some(tachyon::sysinfo::RamSpeed { kind: "DDR5".into(), rated_mts: Some(4800), configured_mts: Some(6000), modules: 2 }),
+        ram: Some(tachyon::sysinfo::RamSpeed {
+            kind: "DDR5".into(),
+            rated_mts: Some(4800),
+            configured_mts: Some(6000),
+            modules: 2,
+            part: None,
+        }),
     };
     let r = tachyon::report::build_with(&prev, Some(end + 50_000), Ok(events), now - 20 * 60_000, &ctx).expect("a report");
     assert!(r.diagnosis.is_some());

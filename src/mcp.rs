@@ -799,7 +799,13 @@ mod tests {
                 ev(150, WER_SYSTEM, 1001, Some("0x0000001a")),
             ],
             ctx: crate::diagnose::Context {
-                ram: Some(crate::sysinfo::RamSpeed { kind: "DDR5".into(), rated_mts: Some(4800), configured_mts: Some(6000), modules: 2 }),
+                ram: Some(crate::sysinfo::RamSpeed {
+                    kind: "DDR5".into(),
+                    rated_mts: Some(4800),
+                    configured_mts: Some(6000),
+                    modules: 2,
+                    part: None,
+                }),
                 ..Default::default()
             },
             ..Default::default()
