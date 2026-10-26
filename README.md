@@ -265,7 +265,33 @@ restart from a killed app, and `EvtQuery` fetches the System events of that
 window. Jobs are accumulated as sums and peaks, so a long render costs a few
 hundred bytes. One instance records at a time (`tachyon.lock`).
 
-@@MEASURED@@
+## Measured
+
+**Pending: real numbers on an RTX 5080 (Windows 11) are being collected
+and will replace this note.** Until then, every figure below comes from
+**wine 10 on Linux with a fake `nvml.dll`** ([`tests/fake_nvml_v4.c`](tests/fake_nvml_v4.c)),
+Xvfb and the picom compositor, the same fake processes for every run,
+30 s after a 22 s warm-up ([`tests/measure.sh`](tests/measure.sh)). The
+preview 5.1.1 was measured in the same session, alternating with 1.0. 1.0
+includes the flight recorder, the job history and the insights; the agent
+API was off.
+
+| Wine 10, fake driver | 1.0 CPU (one core) | 1.0 memory | 5.1.1 CPU | 5.1.1 memory |
+|---|---|---|---|---|
+| Island, idle | 0.33 % | 34 MB | 0.33 % | 33 MB |
+| Companion (Hex), idle | 0.40 % | 34 MB | 0.27 % | 34 MB |
+| Panel, idle | 1.57 % | 45 MB | 1.13 % | 42 MB |
+| Island, rendering | 0.53 % | 34 MB | 0.53 % | 33 MB |
+| Companion, rendering | 0.43 % | 35 MB | 0.40 % | 34 MB |
+| Panel, rendering | 1.47 % | 46 MB | 1.27 % | 43 MB |
+| Companion, hot (3 fps loop) | 0.57 % | 34 MB | | |
+
+Exe: 1,803,776 bytes (5.1.1: 1,423,872). Single 30 s windows vary by
+about ±0.1 percentage points between runs. The panel costs a little more
+than in 5.1.1 because it is taller and shows the insights; island and Hex
+are about where they were. Most of the resident memory is wine itself, and
+wine neither trims the working set nor reports private bytes, so these
+figures say how the modes and versions compare, not what Windows will show.
 
 ## Screenshots
 
