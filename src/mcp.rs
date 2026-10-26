@@ -1237,9 +1237,15 @@ mod tests {
         let r = call(&mut f, json!({ "since": last - 30_000 }))["structuredContent"].clone();
         assert!((30..=32).contains(&r["samples_in_window"].as_u64().unwrap()), "Unix ms, until = since + 60 min: {r:#}");
         // the default is still "the last minutes up to now"
+        // (the fake's samples are dated 26 Oct 2026, so do not count them: on that evening they are "now")
         let r = call(&mut f, json!({}))["structuredContent"].clone();
-        assert_eq!(r["samples_in_window"], 0);
-        assert!(r["note"].as_str().unwrap().contains("sessions"));
+        assert_eq!(r["minutes"], 5.0);
+        let to = chrono::NaiveDateTime::parse_from_str(r["window"]["to"].as_str().unwrap(), "%Y-%m-%d %H:%M:%S").unwrap();
+        let to = to.and_local_timezone(chrono::Local).earliest().unwrap().timestamp_millis();
+        assert!((to - crate::telemetry::now_ms()).abs() < 60_000, "{r:#}");
+        if r["samples_in_window"] == 0 {
+            assert!(r["note"].as_str().unwrap().contains("sessions"));
+        }
         for bad in [json!({ "since": "yesterday" }), json!({ "session": "old" }), json!({ "since": until, "until": since })] {
             assert_eq!(call(&mut f, bad.clone())["isError"], true, "{bad}");
         }
