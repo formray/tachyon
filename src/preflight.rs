@@ -353,7 +353,7 @@ pub fn predict(q: &Query, history: &[JobRecord], live: &LiveVram) -> Preflight {
     };
     let at = q.resolution.as_ref().map(|r| format!("At {r} this job")).unwrap_or_else(|| "This job".into());
     let need_s = if peak_only {
-        format!("{at} filled the card to ~{} last time", gb(mid as f32))
+        format!("{at} had ~{} in use on the card last time", gb(mid as f32))
     } else {
         format!("{at} needs ~{} of VRAM", gb(mid as f32))
     };
@@ -532,7 +532,7 @@ mod tests {
         }
         let p = predict(&Query { name: "intro try 4".into(), ..Default::default() }, &h, &live(2500.0, vec![]));
         assert_eq!(p.fit, Fit::WontFit, "{p:#?}");
-        assert!(p.sentence.starts_with("This job filled the card to ~15.8 GB last time"), "{}", p.sentence);
+        assert!(p.sentence.starts_with("This job had ~15.8 GB in use on the card last time"), "{}", p.sentence);
         assert!(p.evidence.iter().any(|e| e.contains("assumes the same apps")));
         // same project, other job name
         let h = vec![

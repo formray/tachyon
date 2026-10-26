@@ -17,7 +17,7 @@ Two new answers, both worked out from what Tachyon already records. Read-only as
 - In the report view (with *Evidence ›*), Hex's crash announcement, `get_status` (`crash_report.probable_cause`) and the new MCP tool `diagnose_crash` (it also works out older 1.0 reports; without a report, or with `around: "2026-10-22"`, it diagnoses the latest unexpected restart in the Windows Event Log, with the RAM speed and clock offsets as they are now).
 
 **Build and tests**
-- 155 tests (132 in 1.0.1): diagnosis rules incl. the real EXPO case, the prediction and its thresholds, resolution parsing (fuzzed), job hints from a projects tree, SMBIOS parsing, the new MCP tools.
+- 156 tests on Linux, 159 under wine (132 in 1.0.1): diagnosis rules incl. the real EXPO case, the prediction and its thresholds, resolution parsing (fuzzed), job hints from a projects tree, SMBIOS parsing, the new MCP tools.
 - The fake NVML has an `oc` scenario; `tests/wine.sh` can run on its own prefix/display; `tests/shots_v1_1.sh` makes the 1.1 screenshots.
 
 ## v1.0.1

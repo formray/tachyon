@@ -74,9 +74,10 @@ fn diagnose_from_event_log(args: &Value, src: &mut dyn Source, now: i64) -> Resu
             "note": format!("No unexpected restart in the Windows Event Log {what}{}.", if gpu_resets > 0 { format!(", but {gpu_resets} GPU driver event(s)") } else { String::new() }),
         }));
     };
-    // the crash itself comes before the restart's reports (Kernel-Power 41, then the bug check)
+    // the crash itself comes before the restart's reports (Kernel-Power 41, then the bug check);
+    // GPU driver resets in the 12 hours before count as signs of the same instability
     let first = found.iter().filter(|e| e.is_restart() && e.t_ms >= anchor - 15 * 60_000).map(|e| e.t_ms).min().unwrap_or(anchor);
-    let ev = src.events(first - 60 * 60_000, anchor + 10 * 60_000)?;
+    let ev = src.events(first - 12 * 3_600_000, anchor + 10 * 60_000)?;
     let ctx = src.context();
     let d = crate::diagnose::diagnose(report::Cause::Restart, &ev, true, &report::Peaks::default(), &[], None, &ctx);
     let at = chrono::DateTime::from_timestamp_millis(first).map(|d| d.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string());
@@ -85,7 +86,7 @@ fn diagnose_from_event_log(args: &Value, src: &mut dyn Source, now: i64) -> Resu
         "restart_at": at,
         "diagnosis": d,
         "events": ev.iter().map(|e| format!("{}  {}", chrono::DateTime::from_timestamp_millis(e.t_ms).map(|d| d.with_timezone(&chrono::Local).format("%m-%d %H:%M:%S").to_string()).unwrap_or_default(), e.describe())).collect::<Vec<_>>(),
-        "note": "From the Windows Event Log only: Tachyon has no readings from before this restart, and the GPU clock offsets and RAM speed are as they are now, not necessarily as they were then.",
+        "note": "From the Windows Event Log only (the 12 hours before the restart): Tachyon has no readings from before this restart, and the GPU clock offsets and RAM speed are as they are now, not necessarily as they were then.",
     }))
 }
 
@@ -790,7 +791,8 @@ mod tests {
         let mut f = Fake {
             on: true,
             events: vec![
-                ev(-86_400, "nvlddmkm", 153, None), // a day earlier: outside the crash window
+                ev(-86_400, "nvlddmkm", 153, None),   // a day earlier: outside the crash window
+                ev(-9 * 3600, "nvlddmkm", 153, None), // hours before: inside it
                 ev(-900, "nvlddmkm", 153, None),
                 ev(-60, "nvlddmkm", 153, None),
                 ev(90, KERNEL_POWER, 41, Some("0x0000001A")),
@@ -806,7 +808,7 @@ mod tests {
             let r = call(&mut f, args)["structuredContent"].clone();
             assert_eq!(r["source"], "event_log");
             assert_eq!(r["diagnosis"]["causes"][0]["suspect"], "ram", "{r:#}");
-            assert_eq!(r["events"].as_array().unwrap().len(), 4, "{r:#}");
+            assert_eq!(r["events"].as_array().unwrap().len(), 5, "{r:#}");
             assert!(r["note"].as_str().unwrap().contains("Event Log only"));
         }
         assert!(call(&mut f, json!({ "around": "22/10" }))["isError"] == true);
