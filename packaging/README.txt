@@ -1,4 +1,4 @@
-Tachyon 1.0.1
+Tachyon 1.1.0
 =============
 
 The lightest real-time GPU monitor for NVIDIA cards, and the one that explains
@@ -9,6 +9,18 @@ load, temperature, VRAM, power, clocks, fan, video encoder/decoder, PCIe
 traffic, what is limiting the clocks, and which programs are using the GPU
 (with the program that launched them and a category: Game, Creative app,
 Script/Python, Browser, AI/agent, System or Other).
+
+New in 1.1.0
+- Will this job fit? When a render starts, Tachyon compares it with earlier
+  runs of the same job (or project, or a similar name) at the same resolution
+  and tells you early if it will likely run out of video memory, e.g. "At 4K
+  this job needs ~15.2 GB of VRAM; 14.0 GB is free", and which idle apps you
+  could close. With too little history it says nothing rather than guess.
+- Why did it crash? The crash report now names the probable cause with a rough
+  percentage (unstable RAM / EXPO, GPU overclock, power supply, heat, driver
+  timeout or the app itself), the evidence behind it and one thing to try.
+  Estimates only: Tachyon never changes a setting.
+- Two new read-only agent tools: preflight and diagnose_crash.
 
 New in 1.0.1
 - Easier for anyone: a short hint on first start; a damaged tachyon.toml is

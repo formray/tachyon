@@ -4,8 +4,8 @@
 import os, sys, time, shutil, subprocess, glob
 exe, cfg, compact, label = sys.argv[1:5]
 extra = sys.argv[5].replace("\\n", "\n") + "\n" if len(sys.argv) > 5 else ""  # e.g. "mode = 'companion'"
-env = dict(os.environ, WINEPREFIX="/tmp/tachyon-wine/wp", WINEDEBUG="-all", DISPLAY=":77")
-d = "/tmp/tachyon-work/meas5"; shutil.rmtree(d, ignore_errors=True); os.makedirs(d)
+env = dict(os.environ, WINEPREFIX=os.environ.get("WINEPREFIX", "/tmp/tachyon-wine/wp"), WINEDEBUG="-all", DISPLAY=os.environ.get("TDISPLAY", ":77"))
+d = os.environ.get("TT", "/tmp/tachyon-work") + "/meas5"; shutil.rmtree(d, ignore_errors=True); os.makedirs(d)
 name = os.path.basename(exe); shutil.copy(exe, d)
 open(f"{d}/{cfg}", "w").write("render_roots = ['Z:\\\\tmp\\\\tachyon-wine\\\\projects']\n" + extra + "[window]\n"
     f"compact = {compact}\nx = 560\ny = 40\nisland_cx = 800\nisland_y = 24\nalways_on_top = false\n")
