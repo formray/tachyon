@@ -2,7 +2,23 @@
 
 ## v1.1.0 (unreleased)
 
-Work in progress.
+Two new answers, both worked out from what Tachyon already records. Read-only as before.
+
+**Pre-render check ("will this job fit?")**
+- When a render job starts, its peak VRAM and duration are predicted from earlier runs of the same job, the same project or a similar name, at the same resolution (from the job name, the log path or the log's first 16 KB: `4k`, `2160p`, `uhd`, `3840x2160`, `scale=W:H`...).
+- Verdict *should fit*, *tight* (over 95% of the card) or *likely out of memory*, against what other apps hold right now, with idle VRAM hogs named ("closing it would leave 15.2 GB free"). A past run that filled the card counts as a lower bound.
+- Confidence from the kind of match, the number of runs and how much they agree; below 0.4 there is no verdict, and Hex only speaks up (once per job) at 0.65 or more. Re-checked every 30 s during the job's first 15 minutes.
+- Job history lines now also keep the project, resolution, frame count, the job's own peak VRAM, the VRAM in use at the start and the card size (older lines still read).
+- Panel line under the bottleneck, a Hex line and announcement, and the MCP tool `preflight` (`name`, `project`, `resolution`, `frames`; no arguments = the running job).
+
+**Crash diagnosis**
+- The crash report ranks the probable cause with a percentage: unstable RAM / EXPO, GPU overclock, power / PSU, overheating, driver timeout (TDR), application bug, each with its evidence and one piece of advice, and a confidence (*likely*, *possibly* or *unclear*). Never 100%; Tachyon changes no settings.
+- New evidence: the Application log (LiveKernelEvent 141/117 GPU timeout reports, application crashes), bug check codes from Kernel-Power 41 and WER 1001, the GPU clock offsets and power limit vs default (read once a minute and saved next to the flight recorder, so the report knows the settings from before the crash), and the RAM's configured vs rated speed from SMBIOS.
+- In the report view (with *Evidence ›*), Hex's crash announcement, `get_status` (`crash_report.probable_cause`) and the new MCP tool `diagnose_crash` (it also works out older 1.0 reports).
+
+**Build and tests**
+- 155 tests (132 in 1.0.1): diagnosis rules incl. the real EXPO case, the prediction and its thresholds, resolution parsing (fuzzed), job hints from a projects tree, SMBIOS parsing, the new MCP tools.
+- The fake NVML has an `oc` scenario; `tests/wine.sh` can run on its own prefix/display; `tests/shots_v1_1.sh` makes the 1.1 screenshots.
 
 ## v1.0.1
 

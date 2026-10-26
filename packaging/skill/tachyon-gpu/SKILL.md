@@ -36,7 +36,9 @@ Nothing you call can change clocks, fans, power limits, processes or files.
 | "Why is it slow?", "why is the render slow?" | `get_bottleneck` | Quote the sentence and its confidence; name the process; suggest one next check |
 | "Will it run out of VRAM?", before loading a big model or a 4K render | `get_vram_forecast` | Give used/total, the trend and the time to full only if Tachyon gives one |
 | "What is using my GPU / VRAM?" | `get_processes` | List the top processes by VRAM and engine use |
-| "Why did it crash?", "what happened before the driver reset?" | `get_blackbox` (`minutes` 1-60, default 5) | Read `last_crash_report` first, then the peaks and timeline before the event |
+| "Why did it crash?", "what caused the blue screen?" | `diagnose_crash` | Give the top cause with its percentage and confidence word, its evidence and the one piece of advice; mention the runner-up |
+| "What happened before the driver reset?" | `get_blackbox` (`minutes` 1-60, default 5) | Read `last_crash_report` first, then the peaks and timeline before the event |
+| "Will this render fit in VRAM?", before starting a big job | `preflight` (optional `name`, `resolution`, `project`, `frames`) | Quote the sentence, the fit (`fits`/`tight`/`wont_fit`/`unknown`) and confidence; pass on `hog_note` if any |
 | "How did my last renders go?" | `get_history` (`n` 1-100) | Table of jobs: duration, average GPU, peak VRAM, energy (Wh), throttling |
 | "Was this render faster than last time?" | `compare_last_run` (optional `name`) | Say faster/slower by how much and the likely reason from the comparison |
 
@@ -56,6 +58,11 @@ the summary is usually enough and much smaller.
   errors, unexpected restarts) with the flight recorder. Report what it says; do not
   diagnose hardware faults beyond it. Suggest the user checks drivers, overclocks or
   temperatures, not that they change settings blindly.
+- **Crash diagnosis**: percentages are rough shares of the evidence, never certainty. Keep
+  "likely"/"possibly"; with `unclear` say Windows logged nothing conclusive. The advice is
+  a test to try (e.g. RAM one step slower), not an instruction; Tachyon changes nothing.
+- **Preflight**: `unknown` means not enough comparable history; say so instead of guessing.
+  `need_mb` is what the job itself needed before, `free_mb` what other apps leave now.
 - **Energy**: `energy_wh` is measured by the GPU (whole-board). A cost appears only if the
   user set `price_per_kwh`.
 - `source` tells you whether the data came from the running Tachyon (`tachyon`) or a short

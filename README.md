@@ -28,6 +28,29 @@ the [changelog](CHANGELOG.md#previews).
 
 ## Features
 
+New in 1.1 (unreleased):
+
+- **Pre-render check: "will this job fit?".** When a render job starts, Tachyon looks
+  for earlier runs of the same job (then the same project, then a similar name) at the
+  same resolution, read from the job name, the log path or the log's first 16 KB (`4k`,
+  `2160p`, `uhd`, `3840x2160`, ffmpeg `scale=`). From the VRAM those runs' own processes
+  needed and what other apps hold right now it says *should fit*, *tight* or *likely out
+  of memory* ("At 4K this job needs ~15.2 GB of VRAM; 14.0 GB is free. Likely out of
+  memory, or very slow."), names idle apps whose memory closing would free, and gives the
+  expected duration. With one loose match or runs that differ a lot it gives no verdict
+  rather than a false alarm. Hex says it once per job when it is confident; the panel
+  shows it under the bottleneck; agents get the `preflight` tool.
+- **Crash diagnosis.** The crash report now ranks the probable causes with a rough
+  percentage: unstable RAM or EXPO/XMP, GPU core/memory overclock, power or PSU,
+  overheating, a driver timeout (TDR) or an application bug. Rules weigh the bug check
+  code (0x1A, 0x124, 0x116...), NVIDIA driver resets (nvlddmkm 153/13/14), GPU timeout
+  reports (LiveKernelEvent 141/117), WHEA errors, Kernel-Power 41, application crashes,
+  the temperatures, power and load before the stop, the GPU's clock offsets and power
+  limit (saved before the crash) and the RAM speed against its rated speed (SMBIOS). Each
+  cause lists its evidence and one piece of advice; it says *likely* or *possibly*, never
+  certain, and changes no settings. In the report view (*Evidence ›*), in Hex's
+  announcement and in the `diagnose_crash` tool.
+
 New in 1.0, all worked out on the PC from the readings Tachyon already takes (no extra
 polling, no cloud, no AI model):
 
@@ -53,7 +76,7 @@ polling, no cloud, no AI model):
   limit. The next run of the same job is compared with it ("14% slower than last time; GPU
   spent 6 min power-throttled"). Set `price_per_kwh` to see what each job cost.
 - **For AI agents: `tachyon.exe mcp`.** A local [MCP](https://modelcontextprotocol.io)
-  server with seven read-only tools, so an assistant like Claude Desktop or Cursor can ask
+  server with nine read-only tools, so an assistant like Claude Desktop or Cursor can ask
   what the GPU is doing and why. Off until you turn it on in Settings (or set
   `agent_api = true`); it runs on pipes, not the network.
 - **Settings page.** Right-click the island, Hex or the panel and pick *Settings…*, or
@@ -290,7 +313,8 @@ set `agent_api = true` and restart Tachyon. The entry looks like this:
 
 The client starts `tachyon.exe mcp` and talks to it over stdin and stdout.
 Tools: `get_status`, `get_bottleneck`, `get_vram_forecast`, `get_processes`,
-`get_blackbox`, `get_history`, `compare_last_run`; all are read-only. With
+`get_blackbox`, `get_history`, `diagnose_crash` (1.1), `preflight` (1.1),
+`compare_last_run`; all are read-only. With
 Tachyon running, they read the status it publishes every two seconds; without
 it, `tachyon mcp` takes its own short reading.
 
@@ -446,6 +470,9 @@ under wine.
 | ![Hex: the video decoder is the limit](docs/v1_hex_bottleneck.png) | ![Crash report](docs/v1_crash_report.png) |
 | ![VRAM forecast warning in Hex](docs/v1_vram_forecast.png) | ![Job history](docs/v1_history.png) |
 | ![island while rendering](docs/island_render.png) | ![Hex with its bubble](docs/hex_bubble.png) |
+| ![1.1: probable cause in the crash report](docs/v1_1_crash_diagnosis.png) | ![1.1: the evidence behind it](docs/v1_1_crash_evidence.png) |
+| ![1.1: pre-render check in the panel](docs/v1_1_preflight_panel.png) | ![1.1: Hex warns before the job runs out of memory](docs/v1_1_hex_preflight.png) |
+| ![1.1: Hex names the probable cause](docs/v1_1_hex_crash_diagnosis.png) | |
 | ![Settings: General](docs/v1_settings.png) | ![Settings: AI agents, agent API on](docs/v1_settings_ai.png) |
 
 ## Known limits
@@ -461,6 +488,19 @@ under wine.
 - **Bottleneck and forecast** are rules over driver readings, not a profiler:
   *possibly* means a guess. Per-process VRAM is often missing under WDDM, and
   then the forecast is for the card only.
+- **Crash diagnosis (1.1)** is a weighted rule list, not a debugger: the
+  percentages are rough shares of the evidence, and RAM vs GPU overclock can
+  look alike (both give driver resets and memory bug checks). The RAM speed
+  comes from SMBIOS and may be missing on some boards; clock offsets come from
+  NVML and are only known before the crash if Tachyon was running then (older
+  reports are worked out again without them). Application-log events (GPU
+  timeout reports, app crashes) need the Application log to be readable.
+- **Pre-render check (1.1)** learns only from jobs recorded by 1.1 (own-process
+  VRAM); 1.0 records only have the card's peak and give lower confidence. A
+  job's processes are those using at least 5% of the GPU during it, so another
+  busy app at the same time is counted as part of the job. Without per-process
+  VRAM (often under WDDM) it falls back to the card's peak minus where it
+  started. Resolution comes from names and log text only.
 - **NVIDIA only**, Windows 10 1607+ or 11, 64-bit.
 - **No real backdrop blur:** the glass is a tinted fallback.
   `glass = "blur"` is experimental (it may show jagged edges or a blurred
