@@ -95,6 +95,7 @@ fn job(name: &str, kind: JobKind, start_ms: i64, mins: f64, gpu: f32, wh: f64, p
         cost: Some((wh / 1000.0 * 0.30 * 100.0).round() / 100.0),
         currency: Some("EUR".into()),
         vs_last: None,
+        profile: Default::default(),
     }
 }
 

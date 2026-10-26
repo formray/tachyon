@@ -54,6 +54,37 @@ pub struct JobRecord {
     /// The comparison with the previous run, filled in when recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vs_last: Option<String>,
+    /// What the pre-render check matches on and learns from (1.1; empty in older records).
+    #[serde(flatten)]
+    pub profile: JobProfile,
+}
+
+/// Hints about a render job, read once from its logs when it starts.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct JobHints {
+    /// Project folder name (never a path).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    /// Resolution class: "4K", "1080p", ... or "WxH".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<String>,
+    /// Frames in the job, when a log says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frames: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct JobProfile {
+    #[serde(flatten)]
+    pub hints: JobHints,
+    /// Peak VRAM held by the job's own processes (those that used the GPU during the job).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub own_vram_mb: Option<f32>,
+    /// Card VRAM in use when the job started (other apps, and what the job had loaded by then).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_vram_mb: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vram_total_mb: Option<f32>,
 }
 
 /// Strip run counters so retries compare with each other: " try 3", " (2)", " #4", " run 5".
@@ -103,7 +134,16 @@ struct Acc {
     thermal_thr: f64,
     kinds: Vec<(Kind, f64)>,
     names: Vec<(String, f64)>,
+    /// Processes that used the GPU during the job, and the peak VRAM they held together.
+    pids: Vec<u32>,
+    own_peak: Option<f32>,
+    own_now: Option<f32>,
+    start_vram: Option<f32>,
+    vram_total: Option<f32>,
 }
+
+/// A process counts as part of the job once it uses this much of the GPU.
+const OWN_SM: u8 = 5;
 
 fn bump<K: PartialEq>(v: &mut Vec<(K, f64)>, k: K, by: f64) {
     match v.iter_mut().find(|(x, _)| *x == k) {
@@ -120,7 +160,26 @@ impl Acc {
             energy_first: s.energy_mj,
             energy_last: s.energy_mj,
             energy_ok: true,
+            start_vram: s.vram_mb,
             ..Default::default()
+        }
+    }
+
+    /// VRAM of the job's processes in this sample (learning which ones they are on the way).
+    fn own(&mut self, s: &Sample) {
+        for p in &s.procs {
+            if p.sm.unwrap_or(0) >= OWN_SM && !self.pids.contains(&p.pid) && self.pids.len() < 32 {
+                self.pids.push(p.pid);
+            }
+        }
+        let mine: Vec<f32> = s.procs.iter().filter(|p| self.pids.contains(&p.pid)).filter_map(|p| p.vram_mb).collect();
+        self.own_now = (!mine.is_empty()).then(|| mine.iter().sum());
+        self.own_peak = match (self.own_peak, self.own_now) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        };
+        if s.vram_total_mb.is_some() {
+            self.vram_total = s.vram_total_mb;
         }
     }
 
@@ -150,6 +209,7 @@ impl Acc {
             (a, b) => a.or(b),
         };
         self.peak_temp = self.peak_temp.max(s.temp);
+        self.own(s);
         if s.power_throttled() {
             self.power_thr += dt;
         }
@@ -198,6 +258,17 @@ impl Acc {
         for (k, v) in t.names {
             bump(&mut self.names, k, v);
         }
+        for p in t.pids {
+            if !self.pids.contains(&p) && self.pids.len() < 32 {
+                self.pids.push(p);
+            }
+        }
+        self.own_peak = match (self.own_peak, t.own_peak) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        };
+        self.own_now = t.own_now;
+        self.vram_total = t.vram_total.or(self.vram_total);
     }
 
     fn top_name(&self) -> Option<String> {
@@ -242,6 +313,12 @@ impl Acc {
             cost,
             currency: cost.and(price.map(|(_, c)| c.to_string())),
             vs_last: None,
+            profile: JobProfile {
+                hints: JobHints::default(),
+                own_vram_mb: self.own_peak,
+                start_vram_mb: self.start_vram,
+                vram_total_mb: self.vram_total,
+            },
         }
     }
 }
@@ -249,6 +326,7 @@ impl Acc {
 struct Live {
     kind: JobKind,
     name: Option<String>,
+    hints: JobHints,
     acc: Acc,
     tail: Option<Acc>,
     quiet_s: f64,
@@ -281,6 +359,17 @@ impl JobTracker {
 
     /// One sample. `render` is the current render job (name, fps), `kind` the bottleneck verdict.
     pub fn push(&mut self, s: &Sample, render: Option<(&str, Option<f64>)>, kind: Option<Kind>) -> Option<JobRecord> {
+        self.push_with(s, render, kind, None)
+    }
+
+    /// `push` with what the render logs say about the job (project, resolution, frames).
+    pub fn push_with(
+        &mut self,
+        s: &Sample,
+        render: Option<(&str, Option<f64>)>,
+        kind: Option<Kind>,
+        hints: Option<&JobHints>,
+    ) -> Option<JobRecord> {
         let dt = self.last_ms.map_or(1.0, |l| ((s.t_ms - l) as f64 / 1000.0).clamp(0.0, 5.0));
         self.last_ms = Some(s.t_ms);
         let util = s.util.unwrap_or(0);
@@ -303,7 +392,22 @@ impl JobTracker {
             && let Some((n, _)) = render
         {
             self.busy = None;
-            self.live = Some(Live { kind: JobKind::Render, name: Some(n.to_string()), acc: Acc::new(s), tail: None, quiet_s: 0.0 });
+            self.live = Some(Live {
+                kind: JobKind::Render,
+                name: Some(n.to_string()),
+                hints: JobHints::default(),
+                acc: Acc::new(s),
+                tail: None,
+                quiet_s: 0.0,
+            });
+        }
+        if let (Some(l), Some(h)) = (self.live.as_mut(), hints)
+            && l.kind == JobKind::Render
+        {
+            // hints can arrive later (the total frame count appears once the log says it)
+            l.hints.project = h.project.clone().or(l.hints.project.take());
+            l.hints.resolution = h.resolution.clone().or(l.hints.resolution.take());
+            l.hints.frames = h.frames.or(l.hints.frames);
         }
 
         let fps = render.and_then(|r| r.1);
@@ -332,7 +436,7 @@ impl JobTracker {
             if self.busy_s >= BUSY_START_S {
                 let acc = self.busy.take().unwrap_or_default();
                 self.busy_s = 0.0;
-                self.live = Some(Live { kind: JobKind::Gpu, name: None, acc, tail: None, quiet_s: 0.0 });
+                self.live = Some(Live { kind: JobKind::Gpu, name: None, hints: JobHints::default(), acc, tail: None, quiet_s: 0.0 });
             }
         } else {
             self.busy = None;
@@ -346,8 +450,14 @@ impl JobTracker {
         let l = self.live.take()?;
         let name = l.name.or_else(|| l.acc.top_name()).unwrap_or_else(|| "GPU work".into());
         let price = self.price.as_ref().map(|(p, c)| (*p, c.as_str()));
-        let r = l.acc.finish(l.kind, name, price);
+        let mut r = l.acc.finish(l.kind, name, price);
+        r.profile.hints = l.hints;
         (r.duration_s >= MIN_JOB_S).then_some(r)
+    }
+
+    /// VRAM the running job's own processes hold right now (0 when none yet).
+    pub fn live_own_vram(&self) -> f32 {
+        self.live.as_ref().and_then(|l| l.tail.as_ref().and_then(|t| t.own_now).or(l.acc.own_now)).unwrap_or(0.0)
     }
 
     pub fn live(&self) -> Option<LiveJob> {
@@ -598,6 +708,41 @@ mod tests {
     }
 
     #[test]
+    fn render_job_keeps_hints_and_its_own_vram() {
+        let mut t = JobTracker::default();
+        let mut out = vec![];
+        let h = JobHints { project: Some("ladial".into()), resolution: Some("4K".into()), frames: None };
+        for i in 0..200 {
+            let mut x = s(i, 90, 300.0, None);
+            x.vram_total_mb = Some(16376.0);
+            x.procs[0].vram_mb = Some(3000.0 + i as f32 * 10.0);
+            // an idle app holding memory is not part of the job
+            x.procs.push(Proc { pid: 9, name: "chrome.exe".into(), vram_mb: Some(1200.0), sm: Some(0), ..x.procs[0].clone() });
+            // the frame count shows up in the log a little later
+            let h = if i < 20 { h.clone() } else { JobHints { frames: Some(240), ..Default::default() } };
+            out.extend(t.push_with(&x, Some(("demo4k try 1", None)), Some(Kind::GpuBound), Some(&h)));
+            if i == 50 {
+                assert_eq!(t.live_own_vram(), 3500.0);
+            }
+        }
+        out.extend(t.push(&s(200, 90, 300.0, None), Some(("other", None)), None));
+        let r = &out[0];
+        assert_eq!(r.profile.hints, JobHints { project: Some("ladial".into()), resolution: Some("4K".into()), frames: Some(240) });
+        assert_eq!(r.profile.own_vram_mb, Some(4990.0));
+        assert_eq!(r.profile.start_vram_mb, Some(4000.0));
+        assert_eq!(r.profile.vram_total_mb, Some(16376.0));
+        // flat in the JSONL, and older records without it still read
+        let line = serde_json::to_string(r).unwrap();
+        assert!(line.contains("\"resolution\":\"4K\"") && line.contains("\"own_vram_mb\":4990"), "{line}");
+        assert_eq!(serde_json::from_str::<JobRecord>(&line).unwrap(), *r);
+        let mut old: serde_json::Value = serde_json::from_str(&line).unwrap();
+        for k in ["project", "resolution", "frames", "own_vram_mb", "start_vram_mb", "vram_total_mb"] {
+            old.as_object_mut().unwrap().remove(k);
+        }
+        assert_eq!(serde_json::from_value::<JobRecord>(old).unwrap().profile, JobProfile::default());
+    }
+
+    #[test]
     fn comparison_sentences() {
         let base = JobRecord {
             kind: JobKind::Render,
@@ -619,6 +764,7 @@ mod tests {
             cost: None,
             currency: None,
             vs_last: None,
+            profile: Default::default(),
         };
         let slower = JobRecord { duration_s: 1140.0, power_throttled_s: 360.0, energy_wh: Some(104.0), ..base.clone() };
         assert_eq!(compare(&base, &slower), "14% slower than last time; GPU spent 6 min power-throttled.");
