@@ -1,7 +1,8 @@
 //! Flight recorder ("black box"): the last 10-15 minutes of samples on disk, so they survive a
 //! hard crash or a sudden restart. Two preallocated ring files take turns, one per session, so
 //! the previous session's data is still there when Tachyon starts again. Records are fixed-size
-//! (192 bytes, checksummed), written every few seconds in one go; the data is flushed to disk
+//! (256 bytes, checksummed; 1.0 wrote 192-byte records, still read), written every few seconds in
+//! one go; the data is flushed to disk
 //! every 30 s, never per record. A small `session.json` marks whether the last session ended
 //! cleanly. Nothing is kept in memory: exports read the ring file back.
 use crate::telemetry::{Proc, Sample};
@@ -10,12 +11,21 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-pub const REC: usize = 192;
+/// Record size written since 1.1 (format 2).
+pub const REC: usize = 256;
+/// Record size of 1.0 ring files (format 1), still read.
+pub const REC_V1: usize = 192;
 const HEADER: usize = 64;
-const MAGIC: &[u8; 8] = b"TACHYBB1";
+/// Ring files with 256-byte records (1.1). 1.0 does not read them (it finds no records, no harm).
+const MAGIC: &[u8; 8] = b"TACHYBB2";
+/// 1.0 ring files (192-byte records).
+pub const MAGIC_V1: &[u8; 8] = b"TACHYBB1";
 const REC_MAGIC: u16 = 0x4254;
 const PROC_SLOTS: usize = 3;
-const NAME_LEN: usize = 24;
+/// Process name bytes per slot (format 2): `CrossDeviceResume.exe` and most names fit whole.
+pub const NAME_LEN: usize = 44;
+/// Format 1 name field. Its third slot overlapped the checksum: only 20 bytes of it were kept.
+const NAME_LEN_V1: usize = 24;
 /// Pending records are written this often.
 pub const WRITE_EVERY_MS: i64 = 5_000;
 /// ... and flushed to the disk this often.
@@ -81,12 +91,35 @@ impl Rd<'_> {
     }
 }
 
-/// Encode one sample (the top three processes only).
+/// Encode one sample (the top three processes only), format 2.
 pub fn encode(s: &Sample, seq: u32) -> [u8; REC] {
     let mut b = [0u8; REC];
-    let mut w = W(&mut b, 0);
+    encode_into(s, seq, &mut b, 2, NAME_LEN);
+    b
+}
+
+/// Encode in the 1.0 format (192 bytes), for tests of the old files.
+#[doc(hidden)]
+pub fn encode_v1(s: &Sample, seq: u32) -> [u8; REC_V1] {
+    let mut b = [0u8; REC_V1];
+    encode_into(s, seq, &mut b, 1, NAME_LEN_V1);
+    b
+}
+
+/// The longest prefix of `name` that fits in `max` bytes, cut on a character boundary.
+pub fn fit_name(name: &str, max: usize) -> &str {
+    let mut n = name.len().min(max);
+    while !name.is_char_boundary(n) {
+        n -= 1;
+    }
+    &name[..n]
+}
+
+fn encode_into(s: &Sample, seq: u32, b: &mut [u8], version: u8, name_len: usize) {
+    let rec = b.len();
+    let mut w = W(b, 0);
     w.put(&REC_MAGIC.to_le_bytes());
-    w.put(&[1, 0]);
+    w.put(&[version, 0]);
     w.put(&seq.to_le_bytes());
     w.put(&s.t_ms.to_le_bytes());
     w.u8o(s.util);
@@ -126,27 +159,47 @@ pub fn encode(s: &Sample, seq: u32) -> [u8; REC] {
                 let cat = CATEGORIES.iter().position(|c| c.eq_ignore_ascii_case(&p.category)).map(|i| i as u8 + 1).unwrap_or(0);
                 w.put(&[cat]);
                 let mut name = [0u8; NAME_LEN];
-                let mut n = p.name.len().min(NAME_LEN);
-                while !p.name.is_char_boundary(n) {
-                    n -= 1;
-                }
-                name[..n].copy_from_slice(&p.name.as_bytes()[..n]);
-                w.put(&name);
+                let cut = fit_name(&p.name, name_len);
+                name[..cut.len()].copy_from_slice(cut.as_bytes());
+                w.put(&name[..name_len]);
             }
-            None => w.put(&[0u8; 12 + NAME_LEN]),
+            None => w.put(&[0u8; 12 + NAME_LEN][..12 + name_len]),
         }
     }
-    let crc = fnv(&b[..REC - 4]);
-    b[REC - 4..].copy_from_slice(&crc.to_le_bytes());
-    b
+    let crc = fnv(&w.0[..rec - 4]);
+    w.0[rec - 4..].copy_from_slice(&crc.to_le_bytes());
 }
 
-/// Decode one record; None if empty or damaged.
+/// A name field read back: up to the first NUL, and only whole UTF-8 characters (a damaged or
+/// cut tail is dropped, never shown as replacement characters).
+fn read_name(raw: &[u8]) -> String {
+    let raw = &raw[..raw.iter().position(|c| *c == 0).unwrap_or(raw.len())];
+    let ok = match std::str::from_utf8(raw) {
+        Ok(t) => t,
+        Err(e) => std::str::from_utf8(&raw[..e.valid_up_to()]).unwrap_or_default(),
+    };
+    ok.chars().filter(|c| !c.is_control()).collect()
+}
+
+/// Decode one record (format 2, or a 192-byte format 1 record); None if empty or damaged.
 pub fn decode(b: &[u8]) -> Option<(u32, Sample)> {
-    if b.len() < REC || u16::from_le_bytes([b[0], b[1]]) != REC_MAGIC {
+    if b.len() >= 4 && b[2] == 1 && b.len() >= REC_V1 {
+        return decode_sized(&b[..REC_V1], REC_V1);
+    }
+    decode_sized(b, REC)
+}
+
+fn decode_sized(b: &[u8], rec: usize) -> Option<(u32, Sample)> {
+    if b.len() < rec || u16::from_le_bytes([b[0], b[1]]) != REC_MAGIC {
         return None;
     }
-    if fnv(&b[..REC - 4]) != u32::from_le_bytes(b[REC - 4..REC].try_into().ok()?) {
+    let version = b[2];
+    let name_len = match (rec, version) {
+        (REC, 2) => NAME_LEN,
+        (REC_V1, 1) => NAME_LEN_V1,
+        _ => return None,
+    };
+    if fnv(&b[..rec - 4]) != u32::from_le_bytes(b[rec - 4..rec].try_into().ok()?) {
         return None;
     }
     let mut r = Rd(b, 4);
@@ -182,13 +235,16 @@ pub fn decode(b: &[u8]) -> Option<(u32, Sample)> {
     s.energy_mj = (e != u64::MAX).then_some(e);
     s.clk_sm_max = r.u16o();
     s.cores = r.u16o();
-    for _ in 0..PROC_SLOTS {
+    for slot in 0..PROC_SLOTS {
         let pid = u32::from_le_bytes(r.take(4).try_into().ok()?);
         let vram = r.f32mb();
         let (sm, enc, dec) = (r.u8o(), r.u8o(), r.u8o());
         let cat = r.take(1)[0];
-        let raw = r.take(NAME_LEN);
-        let name = String::from_utf8_lossy(&raw[..raw.iter().position(|c| *c == 0).unwrap_or(NAME_LEN)]).into_owned();
+        let at = r.1;
+        // format 1: the last 4 bytes of the third name are the checksum, not part of the name
+        let keep = if slot == PROC_SLOTS - 1 { name_len.min(rec - 4 - at) } else { name_len };
+        let name = read_name(&b[at..at + keep]);
+        r.1 += name_len.min(rec - at);
         if pid == 0 && name.is_empty() {
             continue;
         }
@@ -233,11 +289,24 @@ fn ring_path(dir: &Path, which: &str) -> PathBuf {
 pub fn read_ring(path: &Path) -> Vec<Sample> {
     let Ok(f) = File::open(path) else { return vec![] };
     let mut buf = Vec::new();
-    // 60 minutes at 1 s are about 0.7 MB; anything far bigger is not ours
-    if f.take(MAX_RING_BYTES).read_to_end(&mut buf).is_err() || buf.len() < HEADER || &buf[..8] != MAGIC {
+    // 60 minutes at 1 s are about 0.9 MB; anything far bigger is not ours
+    if f.take(MAX_RING_BYTES).read_to_end(&mut buf).is_err() {
         return vec![];
     }
-    let mut v: Vec<(u32, Sample)> = buf[HEADER..].as_chunks::<REC>().0.iter().filter_map(|c| decode(c)).collect();
+    read_ring_bytes(&buf)
+}
+
+/// Every valid record of a ring file's bytes, oldest first.
+pub fn read_ring_bytes(buf: &[u8]) -> Vec<Sample> {
+    if buf.len() < HEADER {
+        return vec![];
+    }
+    let rec = match &buf[..8] {
+        m if m == MAGIC => REC,
+        m if m == MAGIC_V1 => REC_V1,
+        _ => return vec![],
+    };
+    let mut v: Vec<(u32, Sample)> = buf[HEADER..].chunks_exact(rec).filter_map(|c| decode_sized(c, rec)).collect();
     v.sort_by_key(|(seq, _)| *seq);
     v.into_iter().map(|(_, s)| s).collect()
 }
@@ -481,9 +550,72 @@ mod tests {
         assert!(decode(&[0u8; REC]).is_none(), "empty slot");
         // long names are cut at a character boundary
         let mut s2 = sample(1);
-        s2.procs[0].name = "ééééééééééééééé.exe".into();
+        s2.procs[0].name = "éééééééééééééééééééééééé.exe".into();
         let (_, d2) = decode(&encode(&s2, 1)).unwrap();
-        assert!(d2.procs[0].name.len() <= NAME_LEN && d2.procs[0].name.starts_with("éé"));
+        assert!(d2.procs[0].name.len() <= NAME_LEN && d2.procs[0].name.chars().all(|c| c == 'é'), "{}", d2.procs[0].name);
+        assert_eq!(d2.procs[0].name.len(), 44);
+    }
+
+    fn three(third: &str) -> Sample {
+        let mut s = sample(3);
+        for (i, n) in ["dwm.exe", "ShellHost.exe", third].iter().enumerate() {
+            let mut p = s.procs[0].clone();
+            p.pid = 100 + i as u32;
+            p.name = (*n).into();
+            if i > 0 {
+                s.procs.push(p);
+            } else {
+                s.procs[0] = p;
+            }
+        }
+        s
+    }
+
+    /// 1.0 records: the third name's last 4 bytes were the checksum, which read back as garbage
+    /// (`CrossDeviceResume.ex\u{3}\u{dc},m`). Now only the 20 real bytes, whole characters only.
+    #[test]
+    fn old_records_third_name_stops_before_the_checksum() {
+        for seq in [1u32, 7, 99, 12345] {
+            let old = encode_v1(&three("CrossDeviceResume.exe"), seq);
+            let (_, d) = decode(&old).unwrap();
+            let names: Vec<&str> = d.procs.iter().map(|p| p.name.as_str()).collect();
+            assert_eq!(names, ["dwm.exe", "ShellHost.exe", "CrossDeviceResume.ex"]);
+            // a multi-byte character cut by the checksum is dropped, not shown as U+FFFD
+            let (_, d) = decode(&encode_v1(&three("Résumé_Studio_Pro_ü.exe"), seq)).unwrap();
+            let n = &d.procs[2].name;
+            assert!(!n.contains('\u{fffd}') && n.len() <= 20 && "Résumé_Studio_Pro_ü.exe".starts_with(n.as_str()), "{n:?}");
+        }
+        // format 2 keeps the whole name in every slot
+        let (_, d) = decode(&encode(&three("CrossDeviceResume.exe"), 5)).unwrap();
+        assert_eq!(d.procs[2].name, "CrossDeviceResume.exe");
+        assert_eq!(fit_name("añb", 2), "a");
+        assert_eq!(read_name(b"ok\xe2\x80"), "ok");
+        assert_eq!(read_name(b"a\x01b\0zz"), "ab");
+    }
+
+    #[test]
+    fn old_ring_files_are_still_read() {
+        let d = tmp("v1");
+        std::fs::create_dir_all(&d).unwrap();
+        let mut file = MAGIC_V1.to_vec();
+        file.resize(HEADER, 0);
+        for i in [3u32, 1, 2] {
+            file.extend_from_slice(&encode_v1(&three("CrossDeviceResume.exe"), i));
+        }
+        file.extend_from_slice(&[0u8; REC_V1]);
+        std::fs::write(d.join("blackbox_b.bin"), &file).unwrap();
+        let v = read_ring(&d.join("blackbox_b.bin"));
+        assert_eq!(v.len(), 3);
+        assert_eq!(v[2].procs[2].name, "CrossDeviceResume.ex");
+        // the new format is read as well, and a 1.0 record inside a new file is not
+        let mut f2 = MAGIC.to_vec();
+        f2.resize(HEADER, 0);
+        f2.extend_from_slice(&encode(&sample(1), 1));
+        f2.extend_from_slice(&encode_v1(&sample(2), 2));
+        f2.extend_from_slice(&[0u8; 64]);
+        std::fs::write(d.join("blackbox_a.bin"), &f2).unwrap();
+        assert_eq!(read_ring(&d.join("blackbox_a.bin")).len(), 1);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

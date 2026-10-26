@@ -65,19 +65,32 @@ fn flight_recorder_files_take_anything() {
     let d = scratch("rec");
     let good = recorder::encode(&Sample { t_ms: 1_700_000_000_000, util: Some(50), temp: Some(60), ..Default::default() }, 7);
     let mut rng = Rng::new(22);
+    let old = recorder::encode_v1(&Sample { t_ms: 1_700_000_000_000, util: Some(50), ..Default::default() }, 7);
     for _ in 0..rounds() * 4 {
         let b = rng.mutate(&good);
         let _ = recorder::decode(&b);
+        let _ = recorder::decode(&rng.mutate(&old));
         let _ = recorder::decode(&rng.bytes(400));
     }
-    // whole ring files: our header + damaged records, random files, and session.json pointing elsewhere
-    let mut file = b"TACHYBB1".to_vec();
+    // whole ring files (1.1 and 1.0 formats): our header + damaged records, random files, and
+    // session.json pointing elsewhere
+    let mut file = b"TACHYBB2".to_vec();
     file.resize(64, 0);
+    let mut file1 = recorder::MAGIC_V1.to_vec();
+    file1.resize(64, 0);
     for i in 0..20 {
-        file.extend_from_slice(&recorder::encode(&Sample { t_ms: 1_700_000_000_000 + i * 1000, ..Default::default() }, i as u32));
+        let s = Sample { t_ms: 1_700_000_000_000 + i * 1000, ..Default::default() };
+        file.extend_from_slice(&recorder::encode(&s, i as u32));
+        file1.extend_from_slice(&recorder::encode_v1(&s, i as u32));
     }
-    for round in 0..200 {
-        let body = if round % 2 == 0 { rng.mutate(&file) } else { rng.bytes(8192) };
+    assert_eq!(recorder::read_ring_bytes(&file).len(), 20);
+    assert_eq!(recorder::read_ring_bytes(&file1).len(), 20);
+    for round in 0..300 {
+        let body = match round % 3 {
+            0 => rng.mutate(&file),
+            1 => rng.mutate(&file1),
+            _ => rng.bytes(8192),
+        };
         std::fs::write(d.join("blackbox_a.bin"), &body).unwrap();
         let _ = recorder::read_ring(&d.join("blackbox_a.bin"));
         let s = rng.mutate(br#"{"version":"1.0.0","pid":1,"file":"a","started_ms":1,"clean":false}"#);
