@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.1.0 (unreleased)
+
+Work in progress.
+
 ## v1.0.1
 
 Hardening for public use: safer for everyone, easier for anyone. No new readings; everything from 1.0.0 works as before.

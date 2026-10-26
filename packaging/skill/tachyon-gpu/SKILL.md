@@ -5,7 +5,7 @@ license: MIT OR Apache-2.0
 compatibility: Windows 10/11 x64 with an NVIDIA GPU and driver. Needs Tachyon 1.0+ (github.com/formray/tachyon) and its MCP server (tachyon.exe mcp) connected to the agent. No network access needed.
 metadata:
   author: Formray
-  version: "1.0.1"
+  version: "1.1.0"
   homepage: https://github.com/formray/tachyon
   short-description: Explain the local NVIDIA GPU (read-only)
 ---

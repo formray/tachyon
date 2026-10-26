@@ -3,7 +3,7 @@
   "manifest_version": "0.3",
   "name": "tachyon",
   "display_name": "Tachyon GPU monitor",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "Read-only view of this PC's NVIDIA GPU: load, VRAM forecast, bottleneck, crash flight recorder and render job history.",
   "long_description": "Tachyon is a lightweight, read-only NVIDIA GPU monitor for Windows. This extension runs `tachyon.exe mcp`, a local stdio MCP server, so Claude can answer questions such as *why is my render slow?*, *will this model fit in VRAM?*, *what happened before the driver crashed?* and *was this render faster than last time?*\n\n- Seven tools, all read-only (`readOnlyHint: true`). Nothing can change clocks, fans, power limits, processes or files.\n- Local and offline: no network access, no telemetry.\n- Live data comes from the running Tachyon app with **Agent API** turned on in its Settings. Point this extension at that `tachyon.toml` below.\n\nRequires Windows 10/11 x64 and an NVIDIA GPU with its driver installed.",
   "author": {
