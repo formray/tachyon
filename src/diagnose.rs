@@ -670,7 +670,7 @@ mod tests {
     const T: i64 = 1_790_000_000_000;
 
     fn ev(dt_s: i64, provider: &str, id: u32, code: Option<&str>) -> SysEvent {
-        SysEvent { t_ms: T + dt_s * 1000, provider: provider.into(), id, level: 2, code: code.map(str::to_string) }
+        SysEvent { t_ms: T + dt_s * 1000, provider: provider.into(), id, level: 2, code: code.map(str::to_string), record: 0 }
     }
 
     fn peaks(util: u8, temp: u8, power: f32) -> Peaks {

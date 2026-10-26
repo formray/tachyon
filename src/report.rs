@@ -455,7 +455,7 @@ mod tests {
     }
 
     fn ev(t_ms: i64, provider: &str, id: u32) -> SysEvent {
-        SysEvent { t_ms, provider: provider.into(), id, level: 2, code: None }
+        SysEvent { t_ms, provider: provider.into(), id, level: 2, code: None, record: 0 }
     }
 
     #[test]

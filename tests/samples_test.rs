@@ -193,7 +193,7 @@ fn real_recording_before_the_26_oct_power_loss() {
     let lm: Vec<_> = s.iter().filter(|x| x.t_ms >= last - 60_000).cloned().collect();
     let peaks = tachyon::report::peaks(&lm);
     assert_eq!(idle_before(&peaks, &lm), Some((3, 22.9, Some(360.0), Some(33))));
-    let kp41 = SysEvent { t_ms: last + 3_816_000, provider: KERNEL_POWER.into(), id: 41, level: 1, code: None };
+    let kp41 = SysEvent { t_ms: last + 3_816_000, provider: KERNEL_POWER.into(), id: 41, level: 1, code: None, record: 0 };
     let d = diagnose(tachyon::report::Cause::Restart, &[kp41], true, &peaks, &lm, None, &Context::default()).unwrap();
     assert_eq!(d.causes[0].suspect, Suspect::PowerCut, "{d:#?}");
     assert!(d.causes.iter().find(|c| c.suspect == Suspect::Power).is_none_or(|c| c.percent <= 20), "{d:#?}");

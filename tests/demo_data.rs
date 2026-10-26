@@ -165,6 +165,7 @@ fn write_demo_diagnosis() {
         id,
         level,
         code: code.map(Into::into),
+        record: 0,
     };
     let events = vec![
         ev(-300, "nvlddmkm", 153, 2, None),

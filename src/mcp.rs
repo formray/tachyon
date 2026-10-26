@@ -218,9 +218,19 @@ const RECORDER_LOSS_MS: i64 = crate::recorder::SYNC_EVERY_MS + crate::recorder::
 /// One unexpected restart in the Event Log: its reports, and when the PC most likely stopped.
 #[derive(Debug, Clone)]
 struct Stop {
-    /// First and last restart report (Kernel-Power 41, EventLog 6008, BugCheck 1001), as logged.
+    /// First and last restart report (Kernel-Power 41, EventLog 6008, BugCheck 1001), in the
+    /// corrected clock (see `shift_ms`).
     first: i64,
     last: i64,
+    /// The same, as logged.
+    raw_first: i64,
+    raw_last: i64,
+    /// What to add to the restart reports' stamps: when Windows corrected its clock after this
+    /// restart (Kernel-General 1, 30 min or more), the reports were logged with the wrong clock.
+    shift_ms: i64,
+    correction: Option<SysEvent>,
+    /// Event Log record numbers of the restart reports (0 = unknown).
+    min_rec: u64,
     /// The last flight recorder sample before the restart (Tachyon's clock before the stop).
     recorder_ms: Option<i64>,
     /// Windows' last entry in the System log before the boot, and EventLog 6008's last sign of life.
@@ -262,6 +272,29 @@ fn restarts(found: &[SysEvent]) -> Vec<(i64, i64)> {
     out
 }
 
+/// The clock correction that tells a restart's reports were logged with a wrong clock: Windows
+/// moving its clock by 30 min or more after the restart and before the next one (by the Event
+/// Log's record order). Its own stamp is in the corrected clock, so it can look older than the
+/// reports it corrects: an hour-fast clock fixed half an hour after the restart is stamped half an
+/// hour before them. Without record numbers, by the stamps alone.
+fn clock_correction(group: &[&SysEvent], next: Option<u64>, raw_first: i64, changes: &[SysEvent]) -> Option<SysEvent> {
+    let max_rec = group.iter().map(|e| e.record).max().unwrap_or(0);
+    let min_rec = group.iter().map(|e| e.record).filter(|r| *r > 0).min().unwrap_or(0);
+    changes
+        .iter()
+        .filter(|e| e.clock_change_s().is_some_and(|d| d.abs() >= 1800))
+        .filter(|e| e.t_ms <= raw_first + 86_400_000)
+        .filter(|e| {
+            if e.record > 0 && min_rec > 0 {
+                e.record > max_rec && next.is_none_or(|n| e.record < n)
+            } else {
+                e.t_ms >= raw_first + e.clock_change_s().unwrap_or(0) * 1000 - 15 * 60_000
+            }
+        })
+        .min_by_key(|e| if e.record > 0 { (e.record, 0) } else { (0, e.t_ms) })
+        .cloned()
+}
+
 /// `diagnose_crash` without a crash report (or for a date or time): the unexpected restart in the
 /// Event Log that matches, with the stop time worked out from the flight recorder's last sample
 /// and Windows' last log entries, the recorder's readings from just before, and what Tachyon can
@@ -290,17 +323,46 @@ fn diagnose_from_event_log(args: &Value, src: &mut dyn Source, now: i64) -> Resu
     let gpu_resets = found.iter().filter(|e| e.is_gpu()).count();
     let samples = all_samples(src);
     let groups = restarts(&found);
+    let members = |&(f, l): &(i64, i64)| found.iter().filter(move |e| e.is_restart() && e.t_ms >= f && e.t_ms <= l).collect::<Vec<_>>();
+    // clock corrections from before the first restart to a day after the last
+    let changes: Vec<SysEvent> = match (groups.first(), groups.last()) {
+        (Some(a), Some(b)) => src
+            .events(a.0 - 13 * 3_600_000, b.1 + 86_400_000)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|e| e.clock_change_s().is_some())
+            .collect(),
+        _ => vec![],
+    };
     // work out when the PC stopped, for each restart
     let mut stops: Vec<Stop> = vec![];
-    for (i, &(first, last)) in groups.iter().enumerate() {
-        let floor = if i > 0 { groups[i - 1].1 } else { first - 12 * 3_600_000 };
+    for (i, g) in groups.iter().enumerate() {
+        let (raw_first, raw_last) = *g;
+        let group = members(g);
+        let min_rec = group.iter().map(|e| e.record).filter(|r| *r > 0).min().unwrap_or(0);
+        let next = groups.get(i + 1).and_then(|n| members(n).iter().map(|e| e.record).filter(|r| *r > 0).min());
+        let correction = clock_correction(&group, next, raw_first, &changes);
+        let shift_ms = correction.as_ref().and_then(|c| c.clock_change_s()).unwrap_or(0) * 1000;
+        let (first, last) = (raw_first + shift_ms, raw_last + shift_ms);
+        let floor = stops.last().map_or(first - 12 * 3_600_000, |p| p.last);
         let recorder_ms = samples.iter().rev().find(|s| s.t_ms < first && s.t_ms > floor).map(|s| s.t_ms);
-        let alive_ms =
-            found.iter().filter(|e| e.t_ms >= first && e.t_ms <= last).filter_map(|e| e.last_alive_ms()).filter(|t| *t < first).max();
-        let log = src.last_log_before(first).unwrap_or_default();
-        let boot = log.iter().filter(|e| e.is_boot_marker() && e.t_ms >= first - 10 * 60_000).map(|e| e.t_ms).min().unwrap_or(first);
-        let log_ms = log.iter().filter(|e| !e.is_boot_marker() && e.t_ms < boot && e.t_ms > floor).map(|e| e.t_ms).max();
-        stops.push(Stop { first, last, recorder_ms, log_ms, alive_ms });
+        let alive_ms = group.iter().filter_map(|e| e.last_alive_ms()).filter(|t| *t < first).max();
+        // Windows' last entry before the boot: by record order when known, else by the stamps
+        // (in the corrected clock, so that entries after the correction do not count)
+        let log = src.last_log_before(first.min(raw_first)).unwrap_or_default();
+        let boot = log
+            .iter()
+            .filter(|e| e.is_boot_marker() && e.t_ms >= raw_first - 10 * 60_000)
+            .map(|e| e.t_ms + shift_ms)
+            .min()
+            .unwrap_or(first);
+        let log_ms = log
+            .iter()
+            .filter(|e| !e.is_boot_marker() && e.t_ms < boot && e.t_ms > floor)
+            .filter(|e| min_rec == 0 || e.record == 0 || e.record < min_rec)
+            .map(|e| e.t_ms)
+            .max();
+        stops.push(Stop { first, last, raw_first, raw_last, shift_ms, correction, min_rec, recorder_ms, log_ms, alive_ms });
     }
     let list = |stops: &[Stop]| {
         stops
@@ -354,12 +416,47 @@ fn diagnose_from_event_log(args: &Value, src: &mut dyn Source, now: i64) -> Resu
     let (first, last) = (stop.first, stop.last);
     // the crash itself comes before the restart's reports; GPU driver resets in the 12 hours
     // before count as signs of the same instability; Windows correcting its clock afterwards
-    // tells how far off it was
-    let mut ev = src.events(first - 12 * 3_600_000, last + 10 * 60_000)?;
-    let later = src.events(last + 10 * 60_000, first + 86_400_000).unwrap_or_default();
-    let corrections: Vec<SysEvent> = later.into_iter().filter(|e| e.clock_change_s().is_some()).collect();
+    // tells how far off it was. Reports logged with the wrong clock are moved to the right time
+    // (and keep the logged time for the list).
+    let shift = stop.shift_ms;
+    let fix_rec = stop.correction.as_ref().map_or(0, |c| c.record);
+    let shifted = |e: &SysEvent| {
+        shift != 0
+            && e.clock_change_s().is_none()
+            && if e.record > 0 && stop.min_rec > 0 && fix_rec > 0 {
+                e.record >= stop.min_rec && e.record < fix_rec
+            } else {
+                e.t_ms >= stop.raw_first - 10 * 60_000 && e.t_ms <= stop.raw_last + 10 * 60_000
+            }
+    };
+    let mut logged_at: Vec<(i64, i64)> = vec![];
+    let mut ev: Vec<SysEvent> = src
+        .events(first.min(stop.raw_first) - 12 * 3_600_000, last.max(stop.raw_last) + 10 * 60_000)?
+        .into_iter()
+        .filter_map(|mut e| {
+            if shifted(&e) {
+                logged_at.push((e.t_ms + shift, e.t_ms));
+                e.t_ms += shift;
+            } else if e.clock_change_s().is_some() || e.t_ms > last + 10 * 60_000 {
+                // corrections are listed below; anything else logged after the restart is not before it
+                return None;
+            }
+            Some(e)
+        })
+        .collect();
+    let later = src.events(first - 12 * 3_600_000, first + 86_400_000).unwrap_or_default();
+    let corrections: Vec<SysEvent> = later
+        .into_iter()
+        .filter(|e| e.clock_change_s().is_some())
+        .filter(|e| match &stop.correction {
+            Some(c) if c.record > 0 && e.record > 0 => e.record >= c.record,
+            Some(c) => e.t_ms >= c.t_ms,
+            None => e.t_ms > last + 10 * 60_000,
+        })
+        .collect();
     ev.extend(corrections.iter().cloned());
     ev.sort_by_key(|e| e.t_ms);
+    ev.dedup();
 
     // the flight recorder: only when it was running until (about) the stop
     let rec_ok = stop.recorder_ms.is_some_and(|r| {
@@ -380,7 +477,7 @@ fn diagnose_from_event_log(args: &Value, src: &mut dyn Source, now: i64) -> Resu
     let holder = report::vram_holder(&window);
 
     // is this restart the current boot? (the restart stamp in today's clock vs the boot time now)
-    let corr_ms: i64 = corrections.iter().filter_map(|e| e.clock_change_s()).sum::<i64>() * 1000;
+    let corr_ms: i64 = if shift != 0 { 0 } else { corrections.iter().filter_map(|e| e.clock_change_s()).sum::<i64>() * 1000 };
     let mut ctx = src.context();
     ctx.just_after =
         src.boot_ms().is_some_and(|b| (first + corr_ms - b).abs() <= 15 * 60_000) && stops.last().is_some_and(|s| s.first == first);
@@ -390,7 +487,21 @@ fn diagnose_from_event_log(args: &Value, src: &mut dyn Source, now: i64) -> Resu
     // the clock after the restart vs the time of the stop
     let mut clock_note = None;
     let fixed = corrections.iter().filter_map(|e| e.clock_change_s()).filter(|d| d.abs() >= 1800).max_by_key(|d| d.abs());
-    if let Some(d) = fixed {
+    if let (Some(c), Some(d)) = (&stop.correction, stop.correction.as_ref().and_then(|c| c.clock_change_s())) {
+        clock_note = Some(format!(
+            "Windows {} its clock by {} at {}, after this restart: the restart reports were logged with a clock {} by about that much ({}). The times here are corrected.",
+            if d < 0 { "put back" } else { "put forward" },
+            crate::events::signed_duration(d).trim_start_matches(['-', '+']),
+            local_text(c.t_ms, "%H:%M:%S"),
+            if d < 0 { "running ahead" } else { "running behind" },
+            match logged_at.iter().min() {
+                Some((_, raw)) =>
+                    format!("logged at {} for a restart at about {}", local_text(*raw, "%H:%M:%S"), local_text(first, "%H:%M:%S")),
+                None =>
+                    format!("logged at {} for a restart at about {}", local_text(stop.raw_first, "%H:%M:%S"), local_text(first, "%H:%M:%S")),
+            }
+        ));
+    } else if let Some(d) = fixed {
         clock_note = Some(format!(
             "After the restart Windows corrected its clock by {}: the restart times above were logged with a clock {} by about that much.",
             crate::events::signed_duration(d),
@@ -452,7 +563,15 @@ fn diagnose_from_event_log(args: &Value, src: &mut dyn Source, now: i64) -> Resu
         }),
         _ => None,
     };
-    let fmt_ev = |e: &SysEvent| format!("{}  {}", local_text(e.t_ms, "%m-%d %H:%M:%S"), e.describe());
+    let fmt_ev = |e: &SysEvent| match logged_at.iter().find(|(t, _)| *t == e.t_ms) {
+        Some((_, raw)) => format!(
+            "{}  {} (logged as {}, with the clock that was wrong)",
+            local_text(e.t_ms, "%m-%d %H:%M:%S"),
+            e.describe(),
+            local_text(*raw, "%H:%M:%S")
+        ),
+        None => format!("{}  {}", local_text(e.t_ms, "%m-%d %H:%M:%S"), e.describe()),
+    };
     let note = if window.is_empty() {
         let why = match stop.recorder_ms {
             Some(r) => format!(
@@ -1131,7 +1250,7 @@ mod tests {
         let rec = oct26();
         let last = rec.last().unwrap().t_ms; // 18:09:04 Rome
         let shifted_boot = last + 3 * 60_000 + 18_000 + 3_600_000; // 18:12:22 real, logged as 19:12:22
-        let e = |t: i64, p: &str, id: u32, code: Option<String>| SysEvent { t_ms: t, provider: p.into(), id, level: 2, code };
+        let e = |t: i64, p: &str, id: u32, code: Option<String>| SysEvent { t_ms: t, provider: p.into(), id, level: 2, code, record: 0 };
         let alive = chrono::DateTime::from_timestamp_millis(last + 29_000).unwrap().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
         let events = vec![
             e(last - 3 * 86_400_000, "nvlddmkm", 153, None), // days before: outside the 12 h
@@ -1216,6 +1335,91 @@ mod tests {
         assert_eq!(r["source"], "event_log");
         assert!(r["note"].as_str().unwrap().contains("no samples from before this restart"), "{r:#}");
         assert!(r["before_the_stop"].is_null());
+    }
+
+    /// The Event Log exactly as on the PC (System log, record numbers included): the restart at
+    /// 18:12:22 logged at 19:12 (BIOS clock 1 h fast), Windows putting the clock back at 18:45:41
+    /// (stamped before the reports it corrects), a real entry at 19:12:11 after that, and a clean
+    /// restart at 19:06:51 with EXPO back on (5600 MT/s).
+    #[test]
+    fn diagnose_crash_on_the_real_26_oct_event_log() {
+        use crate::events::{KERNEL_GENERAL, KERNEL_POWER};
+        let rec = oct26();
+        let last = rec.last().unwrap().t_ms; // 18:09:04
+        let real = |hms: (i64, i64, i64)| last + ((hms.0 - 18) * 3600 + (hms.1 - 9) * 60 + hms.2 - 4) * 1000;
+        let ahead = 3_600_000;
+        let e = |t: i64, p: &str, id: u32, code: Option<String>, record: u64| SysEvent {
+            t_ms: t,
+            provider: p.into(),
+            id,
+            level: 2,
+            code,
+            record,
+        };
+        let alive = chrono::DateTime::from_timestamp_millis(real((17, 31, 14))).unwrap().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+        let kp41 = e(real((18, 12, 25)) + ahead, KERNEL_POWER, 41, None, 40145);
+        let e6008 = e(real((18, 12, 38)) + ahead, "EventLog", 6008, Some(alive), 40132);
+        let fix = e(real((18, 45, 41)), KERNEL_GENERAL, 1, Some("-3600".into()), 40552);
+        let log = vec![
+            e(real((17, 12, 21)), "Service Control Manager", 7040, None, 40112),
+            e(real((17, 15, 0)), "Service Control Manager", 7040, None, 40113),
+            e(real((18, 12, 22)) + ahead, KERNEL_GENERAL, 12, None, 40114),
+            e(real((18, 12, 22)) + ahead, "Microsoft-Windows-Kernel-Boot", 153, None, 40116),
+            e(real((18, 12, 22)) + ahead, "Microsoft-Windows-HAL", 16, None, 40131),
+            e6008.clone(),
+            e(real((18, 12, 24)) + ahead, "Microsoft-Windows-FilterManager", 6, None, 40136),
+            kp41.clone(),
+            fix.clone(),
+            e(real((19, 6, 51)), KERNEL_GENERAL, 12, None, 40700),
+            e(real((19, 6, 55)), "EventLog", 6005, None, 40710),
+            e(real((19, 12, 11)), "Microsoft-Windows-TPM-WMI", 1808, None, 40796),
+        ];
+        let kit = crate::sysinfo::RamSpeed {
+            kind: "DDR5".into(),
+            rated_mts: Some(4800),
+            configured_mts: Some(5600),
+            modules: 4,
+            part: Some("CMK32GX5M2B6000Z30".into()),
+        };
+        let older: Vec<Sample> =
+            (0..900).map(|i| Sample { t_ms: last - 6 * 3_600_000 + i * 1000, util: Some(1), ..Default::default() }).collect();
+        let mut f = Fake {
+            on: true,
+            events: vec![e6008, kp41, fix],
+            log,
+            boot: Some(real((19, 6, 51))),
+            ctx: crate::diagnose::Context { ram: Some(kit), firmware_boot_ms: Some(9_000), ..Default::default() },
+            sessions: vec![("previous".into(), older), ("current".into(), rec)],
+            ..Default::default()
+        };
+        let at = local_text(last, "%Y-%m-%d %H:%M");
+        let r = rpc(&mut f, 7, "tools/call", json!({ "name": "diagnose_crash", "arguments": { "around": at, "days": 1 } }))["result"]["structuredContent"].clone();
+        let txt = serde_json::to_string_pretty(&r).unwrap();
+        assert_eq!(r["source"], "event_log+flight_recorder", "{txt}");
+        assert_eq!(r["stopped_ms"], last, "the recorder's last sample, not the 19:12:11 entry: {txt}");
+        assert_eq!(r["restart_at"], local_text(real((18, 12, 25)), "%Y-%m-%d %H:%M"), "{txt}");
+        assert_eq!(r["last_log_entry"], local_text(real((17, 15, 0)), "%Y-%m-%d %H:%M:%S"), "{txt}");
+        assert!(r["matched"].as_str().unwrap().contains("is 0 min from it"), "{txt}");
+        let note = r["clock_note"].as_str().unwrap();
+        assert!(note.contains("put back its clock by 1 h 0 min at") && note.contains("running ahead"), "{txt}");
+        let events: Vec<&str> = r["events"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+        assert!(events.iter().any(|e| e.contains("Kernel-Power 41") && e.contains("(logged as")), "{txt}");
+        assert!(events.iter().any(|e| e.contains("Kernel-General 1")), "{txt}");
+        assert_eq!(r["before_the_stop"]["idle"], true, "{txt}");
+        let d = &r["diagnosis"];
+        assert_eq!(d["causes"][0]["suspect"], "power_cut", "{txt}");
+        let power = d["causes"].as_array().unwrap().iter().find(|c| c["suspect"] == "power").map_or(0, |c| c["percent"].as_u64().unwrap());
+        assert!(power <= 20, "{txt}");
+        assert!(r["other_restarts"].as_array().unwrap().is_empty(), "the clean restart at 19:06 is not unexpected: {txt}");
+        // without record numbers (older data): the stamps alone give the same stop
+        for ev in f.events.iter_mut().chain(f.log.iter_mut()) {
+            ev.record = 0;
+        }
+        let r =
+            rpc(&mut f, 8, "tools/call", json!({ "name": "diagnose_crash", "arguments": { "around": at } }))["result"]["structuredContent"]
+                .clone();
+        assert_eq!(r["stopped_ms"], last, "{r:#}");
+        assert_eq!(r["diagnosis"]["causes"][0]["suspect"], "power_cut", "{r:#}");
     }
 
     #[test]
@@ -1399,6 +1603,7 @@ mod tests {
             id,
             level: 2,
             code: code.map(Into::into),
+            record: 0,
         };
         let mut f = Fake {
             on: true,
@@ -1463,6 +1668,7 @@ mod tests {
             id,
             level: 2,
             code: code.map(str::to_string),
+            record: 0,
         };
         let events = vec![ev(-5000, "nvlddmkm", 153, None), ev(60_000, crate::events::KERNEL_POWER, 41, Some("0x0000001A"))];
         let mut r = report::build(&prev, Some(stop + 30_000), Ok(events), stop + 90_000).unwrap();

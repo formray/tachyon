@@ -6,7 +6,7 @@
 //! or access is denied the report says so and goes on without events.
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SysEvent {
     pub t_ms: i64,
     pub provider: String,
@@ -16,6 +16,14 @@ pub struct SysEvent {
     /// A code from the event data when it says something (bug check code).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
+    /// The Event Log's record number (0 = unknown). It gives the order events were written in,
+    /// which the time stamps do not when the clock was wrong and then corrected.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub record: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 pub const KERNEL_POWER: &str = "Microsoft-Windows-Kernel-Power";
@@ -267,16 +275,17 @@ pub fn parse_event_xml(xml: &str) -> Option<SysEvent> {
     let level = text(xml, "Level").and_then(|l| l.parse().ok()).unwrap_or(4);
     let ts = attr(xml, "TimeCreated", "SystemTime")?;
     let t_ms = chrono::DateTime::parse_from_rfc3339(&ts).ok()?.timestamp_millis();
+    let record = text(xml, "EventRecordID").and_then(|r| r.trim().parse().ok()).unwrap_or(0);
     match (provider.as_str(), id) {
         // only the kernel reports; WER 1001 also covers every application crash report
         (WER_APP, 1001) => {
             id = live_kernel_code(&data_list(xml))?;
             provider = LIVE_KERNEL.into();
-            return Some(SysEvent { t_ms, provider, id, level, code: None });
+            return Some(SysEvent { t_ms, provider, id, level, code: None, record });
         }
         (APP_ERROR, 1000) => {
             let app = data(xml, "AppName").or_else(|| data_list(xml).into_iter().next()).map(|a| exe_only(&a)).filter(|a| !a.is_empty());
-            return Some(SysEvent { t_ms, provider, id, level, code: app });
+            return Some(SysEvent { t_ms, provider, id, level, code: app, record });
         }
         _ => {}
     }
@@ -302,7 +311,7 @@ pub fn parse_event_xml(xml: &str) -> Option<SysEvent> {
         }
         _ => None,
     };
-    Some(SysEvent { t_ms, provider, id, level, code })
+    Some(SysEvent { t_ms, provider, id, level, code, record })
 }
 
 /// Query the System log, then the Application log (GPU timeout reports, application crashes).
@@ -429,6 +438,9 @@ mod tests {
         assert!(e.describe().starts_with(
             "Windows restarted after a blue screen (Kernel-Power 41 with bug check 0x00000116): a system crash, not a power loss."
         ));
+        assert_eq!(e.record, 0, "no record number in this one");
+        let r = parse_event_xml(&KP41.replace("<Channel>", "<EventRecordID>40145</EventRecordID><Channel>")).unwrap();
+        assert_eq!(r.record, 40145);
         let n = parse_event_xml(NV153).unwrap();
         assert_eq!((n.provider.as_str(), n.id, n.code.as_deref()), ("nvlddmkm", 153, None));
         assert!(n.is_gpu());
