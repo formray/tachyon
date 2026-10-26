@@ -1108,6 +1108,7 @@ impl App {
             config::save_window(&self.path, &self.cfg.window);
             self.main_hidden = true;
             self.view = super::View::Main;
+            self.set = None;
             ShowWindow(self.hwnd, SW_HIDE);
         }
     }

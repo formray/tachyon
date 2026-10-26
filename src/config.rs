@@ -580,7 +580,7 @@ pub fn pick_config(dir: &Path) -> PathBuf {
     if !new.exists() && old.exists() { old } else { new }
 }
 
-pub const HEADER: &str = "# Tachyon settings. Edit and restart Tachyon.\n\
+pub const HEADER: &str = "# Tachyon settings. Most of these are on the Settings page (right-click menu); or edit and restart Tachyon.\n\
 # render_roots = [] keeps it a pure GPU monitor. [window] is updated automatically on exit.\n\
 # Set util_band_low/util_band_high under [gpu] to colour GPU load by a target band.\n\
 # glass = \"tint\" (default look), \"blur\" (experimental desktop blur) or \"auto\".\n\

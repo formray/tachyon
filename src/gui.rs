@@ -9,6 +9,7 @@
 //! 10 fps). No continuous animation.
 #![allow(clippy::too_many_arguments, unsafe_op_in_unsafe_fn)]
 mod companion;
+mod settings;
 mod views;
 use crate::dw::{self, Dw, Face};
 use crate::present::{self, Surface};
@@ -426,6 +427,8 @@ enum Btn {
     Back,
     Export,
     Why,
+    Settings,
+    Set(settings::Ctl, i8),
 }
 
 const PANEL_W: f32 = 480.0;
@@ -515,6 +518,12 @@ struct App {
     /// finished-job counter and the jobs read for the History view
     hist_cache: Option<(u64, Vec<tachyon::history::JobRecord>)>,
     export_msg: Option<String>,
+    /// Settings view state, only while it is open
+    set: Option<Box<settings::SetUi>>,
+    /// flight recorder (on, minutes) as started: changing it needs a restart
+    boot_blackbox: (bool, u32),
+    /// the poll timer's current interval
+    s_poll_ms: u64,
 }
 
 static mut APP: *mut App = null_mut();
@@ -630,14 +639,30 @@ pub fn run() {
             view: match std::env::var("TACHYON_VIEW").as_deref() {
                 Ok("report") => View::Report,
                 Ok("history") => View::History,
+                Ok("settings") => View::Settings,
                 _ => View::Main,
             },
             show_why: false,
             hist_cache: None,
             export_msg: None,
+            set: None,
+            boot_blackbox: (false, 0),
+            s_poll_ms: 0,
         }));
         APP = a;
         let ap = &mut *a;
+        ap.boot_blackbox = (ap.cfg.blackbox, ap.cfg.blackbox_minutes);
+        ap.s_poll_ms = ap.cfg.poll_ms;
+        if ap.view == View::Settings {
+            let tab = match std::env::var("TACHYON_SETTINGS_TAB").as_deref() {
+                Ok("projects") => settings::Tab::Projects,
+                Ok("alerts") => settings::Tab::Alerts,
+                Ok("data") => settings::Tab::Data,
+                Ok("ai") => settings::Tab::Ai,
+                _ => settings::Tab::General,
+            };
+            ap.set = Some(Box::new(settings::SetUi::new(tab)));
+        }
         let start = ap.cfg.start_mode();
         ap.mode = start;
         if start != UiMode::Companion {
@@ -974,6 +999,7 @@ impl App {
         let to_island = !self.island();
         if to_island {
             self.view = View::Main;
+            self.set = None;
         }
         unsafe {
             let from = (self.shape, self.cur_radius());
@@ -1104,6 +1130,7 @@ impl App {
                     AppendMenuW(m, MF_STRING | if self.cfg.blackbox { 0 } else { MF_GRAYED }, 22, wz("Export flight recorder").as_ptr());
                     AppendMenuW(m, MF_SEPARATOR, 0, null());
                 }
+                AppendMenuW(m, MF_STRING, 23, wz("Settings…").as_ptr());
                 AppendMenuW(m, MF_STRING, 3, wz("Close Tachyon").as_ptr());
             }
             SetForegroundWindow(owner);
@@ -1125,6 +1152,7 @@ impl App {
                     self.open_view(View::Report);
                     self.export_blackbox();
                 }
+                23 => self.open_settings(None),
                 c if c >= 100 => self.select_gpu((c - 100) as u32),
                 _ => {}
             }
@@ -1143,6 +1171,14 @@ impl App {
             Btn::History => self.open_view(View::History),
             Btn::Back => self.open_view(View::Main),
             Btn::Export => self.export_blackbox(),
+            Btn::Settings => {
+                if self.view == View::Settings {
+                    self.open_view(View::Main)
+                } else {
+                    self.open_settings(None)
+                }
+            }
+            Btn::Set(c, d) => self.settings_click(c, d),
             Btn::Why => {
                 self.show_why = !self.show_why;
                 self.fg_valid = false;
@@ -1639,6 +1675,15 @@ impl App {
                     g.dot(cx, cy - 2.0, 3.2, TEXT, 1.0);
                     g.line(cx, cy + 1.0, cx, cy + 6.0, TEXT, 1.0, 1.4);
                 }
+                Btn::Settings => {
+                    // gear: a ring with six teeth
+                    g.stroke_circle(cx, cy, 3.6, TEXT, 1.0, 1.5);
+                    for k in 0..6 {
+                        let a = k as f32 * std::f32::consts::PI / 3.0 + 0.26;
+                        let (s, c) = a.sin_cos();
+                        g.line(cx + c * 5.4, cy + s * 5.4, cx + c * 7.2, cy + s * 7.2, TEXT, 1.0, 1.9);
+                    }
+                }
                 _ => {}
             }
         });
@@ -1656,7 +1701,8 @@ impl App {
         // ---- top row
         let tr = g.stat(|g| g.text("Tachyon", x0, 34.0, Face::SansSemi, 13.0, TEXT, H::L, V::Base));
         let mut bx = xr - 12.0;
-        for (b, on) in [(Btn::Close, false), (Btn::Island, false), (Btn::Pin, self.cfg.window.always_on_top)] {
+        let set_on = self.view == View::Settings;
+        for (b, on) in [(Btn::Close, false), (Btn::Island, false), (Btn::Pin, self.cfg.window.always_on_top), (Btn::Settings, set_on)] {
             self.circle_btn(g, bx, 30.0, b, on);
             bx -= 30.0;
         }
@@ -1681,7 +1727,11 @@ impl App {
         let sub = g.fit(&sub, Face::Sans, 12.0, (bx - 6.0 - sx).max(40.0));
         g.stat(|g| g.text(&sub, sx, 34.0, Face::Sans, 12.0, TEXT2, H::L, V::Base));
         if self.view != View::Main {
-            let y = if self.view == View::Report { self.draw_report_view(g, s, lw) } else { self.draw_history_view(g, s, lw) };
+            let y = match self.view {
+                View::Report => self.draw_report_view(g, s, lw),
+                View::Settings => self.draw_settings_view(g, lw),
+                _ => self.draw_history_view(g, s, lw),
+            };
             self.panel_fixed_h = y;
             self.panel_h = (y + 18.0).ceil().max(FIELD_H + 80.0);
             return;
@@ -2122,6 +2172,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     a.click(b);
                 }
             }
+            return 0;
+        }
+        WM_MOUSEWHEEL if a.view == View::Settings && !a.island() => {
+            let delta = ((wp >> 16) & 0xffff) as u16 as i16;
+            a.settings_wheel(delta > 0);
             return 0;
         }
         WM_EXITSIZEMOVE => {

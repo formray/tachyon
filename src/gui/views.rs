@@ -10,6 +10,7 @@ pub(super) enum View {
     Main,
     Report,
     History,
+    Settings,
 }
 
 /// Word wrap with the real font; the last row is ellipsised when the text does not fit.
@@ -60,6 +61,11 @@ impl App {
     /// Open a panel view from anywhere (menu, bubble, links).
     pub(super) fn open_view(&mut self, v: View) {
         self.view = v;
+        if v == View::Settings && self.set.is_none() {
+            self.set = Some(Box::new(super::settings::SetUi::new(Default::default())));
+        } else if v != View::Settings {
+            self.set = None;
+        }
         if v == View::History {
             self.refresh_history();
         }
@@ -177,7 +183,7 @@ impl App {
     }
 
     /// Header shared by the two extra views: "‹ Back", a title in the field and an action.
-    fn view_header(&mut self, g: &mut G, x0: f32, xr: f32, big: &str, caption: &str, action: Option<(&str, Btn)>) {
+    pub(super) fn view_header(&mut self, g: &mut G, x0: f32, xr: f32, big: &str, caption: &str, action: Option<(&str, Btn)>) {
         let hov = self.hover == Some(Btn::Back);
         let br = g.text("‹ Back", x0, 62.0, Face::SansSemi, 12.0, if hov { TEXT } else { T_CYAN }, H::L, V::Base);
         self.hits.push((br.grow(5.0), Btn::Back));
