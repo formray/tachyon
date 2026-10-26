@@ -178,7 +178,8 @@ fn read_name(raw: &[u8]) -> String {
         Ok(t) => t,
         Err(e) => std::str::from_utf8(&raw[..e.valid_up_to()]).unwrap_or_default(),
     };
-    ok.chars().filter(|c| !c.is_control()).collect()
+    // fast path: no C0/DEL bytes and no 0xC2 lead byte (C1 controls are U+0080-U+009F)
+    if ok.bytes().any(|c| c < 0x20 || c == 0x7f || c == 0xc2) { ok.chars().filter(|c| !c.is_control()).collect() } else { ok.to_owned() }
 }
 
 /// Decode one record (format 2, or a 192-byte format 1 record); None if empty or damaged.
@@ -605,6 +606,7 @@ mod tests {
         assert_eq!(fit_name("añb", 2), "a");
         assert_eq!(read_name(b"ok\xe2\x80"), "ok");
         assert_eq!(read_name(b"a\x01b\0zz"), "ab");
+        assert_eq!(read_name("x\u{85}y\u{a0}z".as_bytes()), "xy\u{a0}z", "C1 controls dropped, other characters kept");
     }
 
     #[test]
