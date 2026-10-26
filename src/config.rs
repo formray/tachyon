@@ -657,7 +657,7 @@ pub fn save_mode(path: &Path, m: UiMode) {
     let text = std::fs::read_to_string(path).unwrap_or_else(|_| HEADER.to_string());
     if let Ok(new) = with_mode(&text, m) {
         if new != text {
-            let _ = std::fs::write(path, new);
+            let _ = crate::settings::write_atomic(path, &new, false);
         }
     }
 }
@@ -667,7 +667,7 @@ pub fn save_window(path: &Path, w: &WindowCfg) {
     let text = std::fs::read_to_string(path).unwrap_or_else(|_| HEADER.to_string());
     if let Ok(new) = with_window(&text, w) {
         if new != text {
-            let _ = std::fs::write(path, new);
+            let _ = crate::settings::write_atomic(path, &new, false);
         }
     }
 }

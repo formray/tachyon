@@ -20,6 +20,7 @@ pub mod procinfo;
 pub mod recorder;
 pub mod report;
 pub mod scan;
+pub mod settings;
 pub mod sysinfo;
 pub mod telemetry;
 pub mod theme;
