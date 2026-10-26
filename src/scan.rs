@@ -160,6 +160,29 @@ fn job_name_from_path(p: &Path) -> String {
     }
 }
 
+/// What a job's name, its log path and the head of its log say about it: the project folder,
+/// the resolution class and the frame count. Reads at most 16 KB of the log.
+pub fn job_hints(v: &JobView) -> crate::history::JobHints {
+    let src = Path::new(&v.source);
+    let is_dir = src.is_dir();
+    let project = if v.source.is_empty() {
+        String::new()
+    } else if is_dir {
+        project_of(&src.join("x"))
+    } else {
+        project_of(src)
+    };
+    let resolution = parse::resolution_hint(&v.job)
+        .or_else(|| parse::resolution_hint(&v.source))
+        .or_else(|| if is_dir || v.source.is_empty() { None } else { head(src, 16 * 1024).ok().and_then(|h| parse::resolution_hint(&h)) })
+        .map(parse::resolution_label);
+    crate::history::JobHints {
+        project: (!project.is_empty()).then_some(project),
+        resolution,
+        frames: v.progress.as_ref().and_then(|p| p.total),
+    }
+}
+
 fn age(m: SystemTime) -> f64 {
     SystemTime::now().duration_since(m).unwrap_or(Duration::ZERO).as_secs_f64()
 }

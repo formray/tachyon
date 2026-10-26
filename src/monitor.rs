@@ -96,6 +96,8 @@ pub struct RenderView {
     pub fps: Option<f64>,
     pub job_elapsed: Option<f64>,
     pub job_est_total: Option<f64>,
+    /// Project, resolution and frame count, for the pre-render check and the job history.
+    pub hints: crate::history::JobHints,
 }
 
 /// A GPU process with its launcher chain and category.
@@ -134,10 +136,13 @@ pub fn render_panel_visible(roots: &[String], newest_age_secs: Option<f64>, visi
     !roots.is_empty() && newest_age_secs.is_some_and(|a| a <= visible_secs as f64)
 }
 
+#[derive(Default)]
 struct RenderState {
     cands: Vec<scan::Candidate>,
     last_scan: Option<Instant>,
     rate: scan::RateMeter,
+    /// Hints for the current source, read once per source (and job name).
+    hints: Option<(String, crate::history::JobHints)>,
 }
 
 fn render_tick(cfg: &Config, st: &mut RenderState, t: f64) -> Option<RenderView> {
@@ -164,6 +169,12 @@ fn render_tick(cfg: &Config, st: &mut RenderState, t: f64) -> Option<RenderView>
     let key = format!("{}|{}", j.source, j.stage.as_deref().unwrap_or(""));
     let fps = j.progress.as_ref().and_then(|p| st.rate.push(&key, t, p.frame)).or(j.progress.as_ref().and_then(|p| p.fps));
     let source_name = std::path::Path::new(&j.source).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let hkey = format!("{}|{}", j.source, j.job);
+    if st.hints.as_ref().is_none_or(|(k, _)| *k != hkey) {
+        st.hints = Some((hkey, scan::job_hints(&j)));
+    }
+    let mut hints = st.hints.as_ref().map(|(_, h)| h.clone()).unwrap_or_default();
+    hints.frames = j.progress.as_ref().and_then(|p| p.total).or(hints.frames);
     Some(RenderView {
         job: j.job,
         stage: j.stage,
@@ -172,6 +183,7 @@ fn render_tick(cfg: &Config, st: &mut RenderState, t: f64) -> Option<RenderView>
         fps,
         job_elapsed: j.job_elapsed,
         job_est_total: j.job_est_total,
+        hints,
     })
 }
 
@@ -303,7 +315,7 @@ impl Sampler {
             lost_at: None,
             err: None,
             cur_sel: u32::MAX,
-            rs: RenderState { cands: vec![], last_scan: None, rate: Default::default() },
+            rs: RenderState::default(),
             ptable: Default::default(),
             ptable_at: None,
             cmdlines: HashMap::new(),
@@ -319,7 +331,7 @@ impl Sampler {
     /// tick, the agent API starts or stops publishing, and the engine takes what it can live.
     pub fn apply(&mut self, cfg: Config) {
         if cfg.render_roots != self.cfg.render_roots || cfg.scan_depth != self.cfg.scan_depth {
-            self.rs = RenderState { cands: vec![], last_scan: None, rate: Default::default() };
+            self.rs = RenderState::default();
         }
         match (cfg.agent_api, self.agent.is_some()) {
             (true, false) => self.agent = Some(crate::agent::Publisher::new()),
@@ -432,6 +444,7 @@ impl Sampler {
         s.procs = procs;
         s.render = render;
         let job = s.render.as_ref().map(|r| (r.job.as_str(), r.fps));
+        self.engine.set_hints(s.render.as_ref().map(|r| r.hints.clone()));
         self.engine.tick(s.sample.as_ref(), s.procs.as_deref(), job, crate::telemetry::now_ms(), &mut s.insights);
         s.uptime = t;
         s.ticks += 1;

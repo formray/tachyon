@@ -4,7 +4,9 @@
 use crate::config::Config;
 use crate::explain::{Explainer, Verdict};
 use crate::forecast::{Forecast, Forecaster};
-use crate::history::{JobRecord, JobTracker, LiveJob};
+use crate::history::{JobHints, JobRecord, JobTracker, LiveJob};
+use crate::preflight::{LiveVram, Preflight, Query};
+
 use crate::monitor::ProcView;
 use crate::nvml::GpuSample;
 use crate::recorder::{PrevSession, Recorder};
@@ -17,6 +19,11 @@ use std::path::PathBuf;
 pub const KEEP_PROCS: usize = 8;
 /// The crash report is built on this tick, after the first paint.
 const REPORT_TICK: u64 = 3;
+/// Past jobs the pre-render check looks at.
+const PAST_JOBS: usize = 500;
+/// The check is redone every this many ticks during the job's first `PREFLIGHT_TICKS`.
+const PREFLIGHT_EVERY: u64 = 30;
+const PREFLIGHT_TICKS: u64 = 900;
 
 /// What the UI and the agent API show.
 #[derive(Debug, Clone, Default)]
@@ -35,6 +42,10 @@ pub struct Insights {
     /// Why the recorder or history is off, in plain words.
     pub note: Option<String>,
     pub data_dir: Option<PathBuf>,
+    /// Pre-render check for the running render job ("will this job fit?").
+    pub preflight: Option<Preflight>,
+    /// The check says out of memory with enough confidence and Hex has not said so for this job.
+    pub preflight_new: bool,
 }
 
 pub struct Engine {
@@ -50,6 +61,13 @@ pub struct Engine {
     /// Overclock indicators: the latest reading, and the one the previous session saved.
     oc_now: Option<crate::nvml::OcInfo>,
     prev_oc: Option<crate::nvml::OcInfo>,
+    /// What the render logs say about the running job, the job history for the pre-render check
+    /// (read once, then kept up to date), and which job the check is for.
+    hints: Option<JobHints>,
+    past: Option<Vec<JobRecord>>,
+    pf_key: Option<String>,
+    pf_since: u64,
+    pf_told: Option<String>,
     // Held open while running so a second Tachyon does not share the recorder files.
     _lock: Option<std::fs::File>,
 }
@@ -79,6 +97,11 @@ impl Engine {
             ticks: 0,
             oc_now: None,
             prev_oc: None,
+            hints: None,
+            past: None,
+            pf_key: None,
+            pf_since: 0,
+            pf_told: None,
             _lock: None,
         };
         e.forecaster.set_horizon_minutes(cfg.vram_forecast_minutes);
@@ -138,6 +161,60 @@ impl Engine {
         self.oc_now = Some(oc);
     }
 
+    /// What the render logs say about the running job (project, resolution, frames).
+    pub fn set_hints(&mut self, h: Option<JobHints>) {
+        self.hints = h;
+    }
+
+    /// Past jobs, oldest first (read from disk the first time).
+    fn past(&mut self) -> &[JobRecord] {
+        if self.past.is_none() {
+            self.past = Some(self.history_dir().map(|d| crate::history::recent(&d, PAST_JOBS)).unwrap_or_default());
+        }
+        self.past.as_deref().unwrap_or_default()
+    }
+
+    /// The pre-render check for an ad-hoc query (the agent API), against the card now.
+    pub fn preflight_for(&mut self, q: &Query, live: &LiveVram) -> Preflight {
+        crate::preflight::predict(q, self.past(), live)
+    }
+
+    /// Re-check the running render job: when it starts (or its hints change), then now and then
+    /// during its first minutes while its memory use settles.
+    fn preflight_tick(&mut self, s: &Sample, render: Option<(&str, Option<f64>)>, forecast: &Forecast, out: &mut Insights) {
+        let Some((name, _)) = render.filter(|_| self.history) else {
+            self.pf_key = None;
+            out.preflight = None;
+            out.preflight_new = false;
+            return;
+        };
+        let h = self.hints.clone().unwrap_or_default();
+        let key = format!("{}|{}", crate::history::job_key(crate::history::JobKind::Render, name), h.resolution.as_deref().unwrap_or(""));
+        let fresh = self.pf_key.as_deref() != Some(key.as_str());
+        if fresh {
+            self.pf_key = Some(key.clone());
+            self.pf_since = self.ticks;
+        }
+        let age = self.ticks - self.pf_since;
+        if !fresh && (!age.is_multiple_of(PREFLIGHT_EVERY) || age > PREFLIGHT_TICKS) {
+            return;
+        }
+        let q = Query { name: name.to_string(), project: h.project, resolution: h.resolution, frames: h.frames };
+        let live =
+            LiveVram { total_mb: s.vram_total_mb, used_mb: s.vram_mb, job_now_mb: self.jobs.live_own_vram(), hogs: forecast.hogs.clone() };
+        let p = crate::preflight::predict(&q, self.past(), &live);
+        if p.alarming() && self.pf_told.as_deref() != Some(key.as_str()) {
+            out.preflight_new = true;
+        }
+        out.preflight = Some(p);
+    }
+
+    /// Hex has told the user about the pre-render check for this job.
+    pub fn mark_preflight_told(&mut self, out: &mut Insights) {
+        out.preflight_new = false;
+        self.pf_told = self.pf_key.clone();
+    }
+
     pub fn blackbox_dir(&self) -> Option<PathBuf> {
         self.dir.as_ref().map(|d| d.join("blackbox"))
     }
@@ -164,12 +241,17 @@ impl Engine {
         }
         if self.history && g.is_some() {
             let kind = out.bottleneck.as_ref().map(|v| v.kind);
-            if let Some(job) = self.jobs.push(&s, render, kind) {
+            let hints = if render.is_some() { self.hints.clone() } else { None };
+            if let Some(job) = self.jobs.push_with(&s, render, kind, hints.as_ref()) {
                 self.finish_job(job, out);
             }
             out.live_job = self.jobs.live();
         } else {
             out.live_job = None;
+        }
+        if g.is_some() || render.is_none() {
+            let f = out.forecast.clone();
+            self.preflight_tick(&s, render, &f, out);
         }
         if self.ticks == REPORT_TICK
             && let Some(prev) = self.prev.take()
@@ -184,6 +266,12 @@ impl Engine {
             Some(d) => crate::history::record(&d, job.clone()).unwrap_or(job),
             None => job,
         };
+        if let Some(p) = self.past.as_mut() {
+            p.push(job.clone());
+            if p.len() > PAST_JOBS {
+                p.remove(0);
+            }
+        }
         out.last_job = Some(job);
         out.jobs_done += 1;
     }
@@ -279,6 +367,52 @@ mod tests {
             throttle: Some(0),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn preflight_learns_from_finished_jobs_and_warns_once() {
+        let dir = std::env::temp_dir().join(format!("tachyon_engine_pf_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cfg = Config::default();
+        let t0 = crate::telemetry::now_ms() - 3_600_000;
+        let mut out = Insights::default();
+        let mut e = Engine::new(&cfg, Some(dir.clone()), t0, &mut out);
+        let hints = JobHints { project: Some("ladial".into()), resolution: Some("4K".into()), frames: None };
+        let mut t = t0;
+        // three 4K runs that each fill the card from 1.5 GB to 16.2 GB
+        for run in 0..4 {
+            let name = format!("demo4k try {run}");
+            e.set_hints(Some(hints.clone()));
+            for i in 0..120 {
+                t += 1000;
+                let vram = 1500.0 + (i as f64 * 200.0).min(14_700.0);
+                e.tick(Some(&gpu(97, vram)), None, Some((name.as_str(), None)), t, &mut out);
+                let p = out.preflight.as_ref().expect("a check while a render runs");
+                if i == 0 {
+                    assert_eq!(p.matches, run, "{p:#?}");
+                    match run {
+                        0 => assert_eq!(p.fit, crate::preflight::Fit::Unknown),
+                        3 => {
+                            assert_eq!(p.fit, crate::preflight::Fit::WontFit, "{p:#?}");
+                            assert!(out.preflight_new);
+                            e.mark_preflight_told(&mut out);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if run == 3 {
+                assert!(!out.preflight_new, "told once per job");
+            }
+        }
+        e.set_hints(None);
+        e.tick(Some(&gpu(5, 1500.0)), None, None, t + 1000, &mut out);
+        assert!(out.preflight.is_none() && !out.preflight_new);
+        // an ad-hoc query (the agent API)
+        let live = LiveVram { total_mb: Some(16303.0), used_mb: Some(1500.0), ..Default::default() };
+        let p = e.preflight_for(&Query { name: "demo4k".into(), resolution: Some("1080p".into()), ..Default::default() }, &live);
+        assert_eq!((p.fit, p.matches), (crate::preflight::Fit::Unknown, 0), "other resolution: {p:#?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

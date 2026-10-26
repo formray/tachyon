@@ -250,6 +250,7 @@ mod tests {
             fps: None,
             job_elapsed: None,
             job_est_total: None,
+            hints: Default::default(),
         });
         let l = lines(&s, &cfg, now);
         assert_eq!(l.len(), 3);
