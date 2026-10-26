@@ -5,6 +5,7 @@ pub mod agent;
 pub mod aurora;
 pub mod config;
 pub mod crashlog;
+pub mod diagnose;
 pub mod events;
 pub mod explain;
 pub mod forecast;

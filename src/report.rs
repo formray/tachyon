@@ -84,6 +84,9 @@ pub struct Report {
     /// Hex has told the user about it.
     #[serde(default)]
     pub announced: bool,
+    /// The ranked probable causes (1.1; older reports have none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnosis: Option<crate::diagnose::Diagnosis>,
 }
 
 fn hm(ms: i64) -> String {
@@ -208,6 +211,18 @@ fn just_before(p: &Peaks, holder: Option<&Holder>, gpu_events: &[&SysEvent]) -> 
 /// Build the report for an unclean previous session. `events` is the Event Log result for the
 /// recording window up to now. Returns None when the previous session ended cleanly.
 pub fn build(prev: &PrevSession, boot_ms: Option<i64>, events: Result<Vec<SysEvent>, String>, now_ms: i64) -> Option<Report> {
+    build_with(prev, boot_ms, events, now_ms, &crate::diagnose::Context::default())
+}
+
+/// `build` with what else is known about the PC (overclock indicators, memory speed) for the
+/// crash diagnosis.
+pub fn build_with(
+    prev: &PrevSession,
+    boot_ms: Option<i64>,
+    events: Result<Vec<SysEvent>, String>,
+    now_ms: i64,
+    ctx: &crate::diagnose::Context,
+) -> Option<Report> {
     if prev.session.clean {
         return None;
     }
@@ -255,6 +270,7 @@ pub fn build(prev: &PrevSession, boot_ms: Option<i64>, events: Result<Vec<SysEve
         timeline.push(Line { t_ms: b, text: "Windows started again.".into() });
     }
     timeline.sort_by_key(|l| l.t_ms);
+    let diagnosis = crate::diagnose::diagnose(cause, &events, events_note.is_none(), &p_last, &last, holder.as_ref(), ctx);
 
     Some(Report {
         cause,
@@ -272,6 +288,7 @@ pub fn build(prev: &PrevSession, boot_ms: Option<i64>, events: Result<Vec<SysEve
         recorded_from_ms: prev.samples.first().map(|s| s.t_ms),
         created_ms: now_ms,
         announced: false,
+        diagnosis,
     })
 }
 
@@ -284,6 +301,21 @@ impl Report {
     /// The report as plain text (panel and export).
     pub fn to_text(&self) -> String {
         let mut out = format!("{}\n{}\n\n", self.headline, self.just_before);
+        if let Some(d) = &self.diagnosis {
+            out.push_str(&format!("Probable cause ({})\n  {}\n", d.confidence, d.sentence));
+            for c in &d.causes {
+                out.push_str(&format!("  {:>3}%  {}\n", c.percent, c.label));
+                for e in &c.evidence {
+                    out.push_str(&format!("        - {e}\n"));
+                }
+                out.push_str(&format!("        Try: {}\n", c.advice));
+            }
+            for n in &d.normal {
+                out.push_str(&format!("  Normal: {n}\n"));
+            }
+            out.push_str(&format!("  {}\n\n", d.note));
+        }
+
         let p = &self.peaks_last_minute;
         out.push_str("Peaks in the last minute\n");
         let mut row = |k: &str, v: Option<String>| {

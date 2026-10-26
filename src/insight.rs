@@ -47,6 +47,9 @@ pub struct Engine {
     prev: Option<PrevSession>,
     jobs: JobTracker,
     ticks: u64,
+    /// Overclock indicators: the latest reading, and the one the previous session saved.
+    oc_now: Option<crate::nvml::OcInfo>,
+    prev_oc: Option<crate::nvml::OcInfo>,
     // Held open while running so a second Tachyon does not share the recorder files.
     _lock: Option<std::fs::File>,
 }
@@ -74,6 +77,8 @@ impl Engine {
             prev: None,
             jobs: JobTracker::with_price(cfg.price()),
             ticks: 0,
+            oc_now: None,
+            prev_oc: None,
             _lock: None,
         };
         e.forecaster.set_horizon_minutes(cfg.vram_forecast_minutes);
@@ -95,6 +100,7 @@ impl Engine {
             return e;
         }
         let bb = dir.join("blackbox");
+        e.prev_oc = load_oc(&bb);
         if cfg.blackbox {
             match Recorder::open(&bb, cfg.blackbox_minutes, cfg.poll_interval().as_millis() as u64, now_ms) {
                 Ok((r, prev)) => {
@@ -115,6 +121,21 @@ impl Engine {
         self.history = cfg.history && self.dir.is_some() && self._lock.is_some();
         self.jobs.price = cfg.price();
         self.forecaster.set_horizon_minutes(cfg.vram_forecast_minutes);
+    }
+
+    /// The GPU's overclock indicators (read now and then by the sampler). Saved next to the
+    /// flight recorder when they change, so a crash report after a restart knows the settings
+    /// from before the crash.
+    pub fn set_oc(&mut self, oc: crate::nvml::OcInfo) {
+        if self.oc_now.as_ref() == Some(&oc) {
+            return;
+        }
+        if self.recorder.is_some()
+            && let Some(bb) = self.blackbox_dir()
+        {
+            let _ = save_oc(&bb, &oc);
+        }
+        self.oc_now = Some(oc);
     }
 
     pub fn blackbox_dir(&self) -> Option<PathBuf> {
@@ -170,7 +191,12 @@ impl Engine {
     fn build_report(&mut self, prev: &PrevSession, now_ms: i64, out: &mut Insights) {
         let from = prev.samples.first().map_or(prev.session.started_ms, |s| s.t_ms) - 60_000;
         let events = crate::events::query(from, now_ms, 200);
-        let Some(mut r) = crate::report::build(prev, crate::sysinfo::boot_time_ms(), events, now_ms) else { return };
+        let ctx = crate::diagnose::Context {
+            oc: self.prev_oc.clone().or_else(|| self.oc_now.clone()),
+            oc_after: self.prev_oc.is_none() && self.oc_now.is_some(),
+            ram: crate::sysinfo::ram_speed(),
+        };
+        let Some(mut r) = crate::report::build_with(prev, crate::sysinfo::boot_time_ms(), events, now_ms, &ctx) else { return };
         // Hex announces unexpected restarts; a Tachyon-only stop just gets the panel banner
         r.announced = r.cause != crate::report::Cause::Restart;
         if let Some(bb) = self.blackbox_dir() {
@@ -222,6 +248,22 @@ impl Engine {
     }
 }
 
+const OC_FILE: &str = "gpu_settings.json";
+
+fn save_oc(dir: &std::path::Path, oc: &crate::nvml::OcInfo) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let tmp = dir.join("gpu_settings.tmp");
+    std::fs::write(&tmp, serde_json::to_vec_pretty(oc).map_err(std::io::Error::other)?)?;
+    std::fs::rename(tmp, dir.join(OC_FILE))
+}
+
+fn load_oc(dir: &std::path::Path) -> Option<crate::nvml::OcInfo> {
+    use std::io::Read;
+    let mut buf = Vec::new();
+    std::fs::File::open(dir.join(OC_FILE)).ok()?.take(64 << 10).read_to_end(&mut buf).ok()?;
+    serde_json::from_slice(&buf).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,6 +292,9 @@ mod tests {
             let mut out = Insights::default();
             let mut e = Engine::new(&cfg, Some(dir.clone()), t0, &mut out);
             assert!(out.note.is_none(), "{:?}", out.note);
+            let oc = crate::nvml::OcInfo { mem_offset_mhz: Some(1000), ..Default::default() };
+            e.set_oc(oc.clone());
+            e.set_oc(oc);
             for i in 0..120 {
                 e.tick(Some(&gpu(97, 15000.0)), None, None, t0 + i * 1000, &mut out);
             }
@@ -262,6 +307,8 @@ mod tests {
         let mut out = Insights::default();
         let mut e = Engine::new(&cfg, Some(dir.clone()), t1, &mut out);
         assert!(out.report.is_none());
+        assert_eq!(e.prev_oc.as_ref().and_then(|o| o.mem_offset_mhz), Some(1000), "settings from before the crash");
+        e.set_oc(crate::nvml::OcInfo::default());
         for i in 0..3 {
             e.tick(Some(&gpu(5, 2000.0)), None, None, t1 + i * 1000, &mut out);
         }
@@ -271,6 +318,11 @@ mod tests {
         assert_eq!(r.announced, !out.report_new);
         assert_eq!(r.samples, 116, "written every 5 s: the last few seconds are lost, as in a real crash");
         assert!(r.just_before.contains("GPU at 97%"), "{}", r.just_before);
+        if let Some(d) = &r.diagnosis {
+            // a restart with no event log here: the memory offset from before the crash is evidence
+            assert!(d.causes.iter().any(|c| c.evidence.iter().any(|e| e.contains("memory clock offset +1000 MHz"))), "{d:#?}");
+        }
+
         e.mark_announced(&mut out);
         assert!(!out.report_new);
         let (csv, _json) = e.export(t1 + 4000, &out).unwrap();

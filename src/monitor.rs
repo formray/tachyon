@@ -285,6 +285,8 @@ pub struct Sampler {
     pub selected: u32,
     pub engine: crate::insight::Engine,
     agent: Option<crate::agent::Publisher>,
+    /// When the overclock indicators were last read (once a minute).
+    oc_at: Option<(Instant, u32)>,
 }
 
 impl Sampler {
@@ -309,6 +311,7 @@ impl Sampler {
             snap,
             selected: sel,
             engine,
+            oc_at: None,
         }
     }
 
@@ -381,6 +384,12 @@ impl Sampler {
             } else {
                 self.lost_at = self.lost_at.filter(|l| t0 - *l < Duration::from_secs(60));
                 sample = Some(g);
+                // overclock indicators for the crash diagnosis: a few cheap queries once a minute
+                if self.oc_at.is_none_or(|(a, s)| s != sel || t0 - a >= Duration::from_secs(60)) {
+                    self.oc_at = Some((t0, sel));
+                    let oc = n.oc_info(sel);
+                    self.engine.set_oc(oc);
+                }
             }
         }
         // process attribution: Toolhelp snapshot only when there are GPU processes, every N s
