@@ -1,0 +1,15 @@
+version: 2
+updates:
+  # keeps the SHA-pinned actions current (one PR a week at most, grouped)
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

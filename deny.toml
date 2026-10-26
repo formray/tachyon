@@ -1,0 +1,23 @@
+# cargo deny check: known vulnerabilities, licences, duplicate or banned crates, and where crates come from.
+[graph]
+targets = ["x86_64-pc-windows-gnu", "x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"]
+
+[advisories]
+# every RustSec advisory (vulnerable, unmaintained, yanked) fails the check
+unmaintained = "all"
+yanked = "deny"
+
+[licenses]
+# permissive licences only, compatible with MIT OR Apache-2.0
+allow = ["MIT", "Apache-2.0", "BSD-3-Clause", "BSD-2-Clause", "ISC", "Zlib", "Unicode-3.0"]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+# crates.io only: no git dependencies, no other registries
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
