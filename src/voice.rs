@@ -207,8 +207,9 @@ fn preflight_line(p: &Preflight) -> Line {
 /// Hex speaks up, once per job, when the pre-render check says it will likely run out of memory:
 /// the verdict, what closing idle apps would free (or what it rests on).
 pub fn preflight_lines(p: &Preflight) -> Vec<Line> {
-    let mut v = vec![Line { words: vec![(p.job.clone(), Tone::Name), (": will it fit?".into(), Tone::Quiet)], render: false }];
-    v.push(Line { words: vec![(first_sentence(&p.sentence).trim_end().to_string(), Tone::Hot)], render: false });
+    let verdict = if p.fit == Fit::WontFit { ": likely out of memory." } else { ": VRAM will be tight." };
+    let mut v = vec![Line { words: vec![(p.job.clone(), Tone::Name), (verdict.into(), Tone::Hot)], render: false }];
+    v.push(Line { words: vec![(first_sentence(&p.sentence).trim_end().to_string(), Tone::Plain)], render: false });
     let tail = p.hog_note.clone().unwrap_or_else(|| {
         format!("From {} past run{} ({} confidence).", p.matches, if p.matches == 1 { "" } else { "s" }, p.confidence_word)
     });
@@ -343,7 +344,7 @@ mod tests {
         assert_eq!(
             a,
             [
-                "demo4k try 3: will it fit?",
+                "demo4k try 3: likely out of memory.",
                 "At 4K this job needs ~15.9 GB of VRAM; 14.6 GB is free.",
                 "From 3 past runs (high confidence)."
             ]
