@@ -110,7 +110,7 @@ pub(super) enum Special {
 }
 
 /// True when a fullscreen app (game, video, presentation) is in front on the sprite's monitor.
-unsafe fn fullscreen_in_front(near: HWND) -> bool {
+pub(super) unsafe fn fullscreen_in_front(near: HWND) -> bool {
     let fg = GetForegroundWindow();
     if fg.is_null() || fg == near || fg == GetDesktopWindow() || fg == GetShellWindow() || IsWindowVisible(fg) == 0 || IsIconic(fg) != 0 {
         return false;

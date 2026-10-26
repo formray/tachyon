@@ -1306,10 +1306,13 @@ impl App {
             let (l, t) = load_temp(&self.s.snap);
             let (amb, red) = temps(&self.cfg);
             let now = self.now_ms();
-            if self.aurora.update(l, t, amb, red, now) && !self.main_hidden {
+            // a game, video or presentation fills this monitor: keep sampling and recording,
+            // stop drawing until it is gone (the next poll catches up)
+            let paused = !self.main_hidden && companion::fullscreen_in_front(self.hwnd);
+            if self.aurora.update(l, t, amb, red, now) && !self.main_hidden && !paused {
                 SetTimer(self.hwnd, 3, 100, None);
             }
-            if self.anim.is_none() {
+            if self.anim.is_none() && !paused {
                 self.frame(true);
             }
         }
