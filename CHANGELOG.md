@@ -15,7 +15,9 @@ Tachyon 1.0 is the first release. It supersedes the 5.x preview builds: those nu
 - New menu items: *Crash report*, *Job history*, *Export flight recorder*, *Settings…*.
 - Exe about 1.85 MB (was 1.4 MB).
 
-Known limits: still not run on real Windows; Windows events, the energy counter and restart detection are tested with synthetic data only (wine does not answer event log queries). See the README.
+Measured on Windows 11 with an RTX 5080: about 0.05 % of total CPU and 32 MB working set in Hex mode during a GPU render, 0.025 % and 25 MB idle; `tachyon.exe mcp` answers in under a millisecond with Tachyon running. Figures and method in the README.
+
+Known limits: checked on one Windows 11 PC so far; the crash report after a real restart, its Windows events and the restart detection are tested with synthetic data only (wine does not answer event log queries). See the README.
 
 ## Previews
 

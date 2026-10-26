@@ -304,8 +304,33 @@ hundred bytes. One instance records at a time (`tachyon.lock`).
 
 ## Measured
 
-**Pending: real numbers on an RTX 5080 (Windows 11) are being collected
-and will replace this note.** Until then, every figure below comes from
+### Windows 11, RTX 5080
+
+One PC: Windows 11 Pro (build 26300), GeForce RTX 5080 16 GB, driver 617.42,
+Ryzen 9 9950X (32 threads), 64 GB RAM. Tachyon in Hex (companion) mode,
+measured from outside with `Get-Process` (CPU time over the window,
+working set and private bytes) while a GPU video render ran (87 s and
+143 s, the GPU at 72–84 % and about 220–260 W) and again with the GPU idle.
+The render rows are from the 1.0 build just before the Settings page, the
+idle and MCP rows from this release.
+
+| Windows 11, RTX 5080 | CPU (all 32 threads) | CPU (one core) | Working set | Private bytes |
+|---|---|---|---|---|
+| Hex, GPU rendering (5 s samples, 158 in all) | 0.05 % (peak 0.17 %) | about 1.6 % | 32 MB (peak 34) | 38 MB |
+| Hex, idle (60 s, agent API on) | 0.025 % | 0.8 % | 25 MB | 33 MB |
+| `tachyon.exe mcp`, between requests | 0 % | 0 % | 9 MB | 1.7 MB |
+
+The two render jobs were picked up from their logs and saved in the job
+history, and the panel's VRAM figure matched `nvidia-smi` (1252 vs 1254 MiB
+with 326 MiB reserved by the driver). An MCP client on the same PC got its
+`initialize` answer 9 ms after starting `tachyon.exe mcp`; with Tachyon
+running, each tool answered in 0.05–0.4 ms (median; at most 8.5 ms for the
+first `get_blackbox`, which reads the recorder files), and temperature and
+power matched `nvidia-smi` (35 °C, 29.6 vs 29.0 W).
+
+### Wine on Linux
+
+These figures come from
 **wine 10 on Linux with a fake `nvml.dll`** ([`tests/fake_nvml_v4.c`](tests/fake_nvml_v4.c)),
 Xvfb and the picom compositor, the same fake processes for every run,
 30 s after a 22 s warm-up ([`tests/measure.sh`](tests/measure.sh)). The
@@ -356,10 +381,11 @@ under wine.
 
 ## Known limits
 
-- **Not yet run on real Windows.** Everything above was built and checked
-  under wine; the Windows 10/11 checks are still to come. Wine does not answer
-  event log queries, so the Windows events in the crash report, the energy
-  counter and the restart detection are only tested with synthetic data.
+- **Checked on one Windows 11 PC** (RTX 5080) for live readings, job detection,
+  the history and the MCP server; Windows 10 and other cards are untested.
+  The crash report after a real restart, its Windows events and the restart
+  detection are still only tested with synthetic data (wine does not answer
+  event log queries).
 - **Crash report:** it can say *when* and *what was running*, not prove the
   cause. A clean shutdown is not a crash; a power cut during the last 30 s may
   lose those seconds.
