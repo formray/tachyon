@@ -76,6 +76,7 @@ impl Engine {
             ticks: 0,
             _lock: None,
         };
+        e.forecaster.set_horizon_minutes(cfg.vram_forecast_minutes);
         out.data_dir = dir.clone();
         let Some(dir) = dir else {
             out.note = Some("No data folder (LOCALAPPDATA is not set), so the flight recorder and history are off.".into());
@@ -108,6 +109,14 @@ impl Engine {
         e
     }
 
+    /// Settings changed while running: what can follow at once does (history on/off, energy price,
+    /// VRAM forecast horizon). The flight recorder keeps its files until the next start.
+    pub fn apply(&mut self, cfg: &Config) {
+        self.history = cfg.history && self.dir.is_some() && self._lock.is_some();
+        self.jobs.price = cfg.price();
+        self.forecaster.set_horizon_minutes(cfg.vram_forecast_minutes);
+    }
+
     pub fn blackbox_dir(&self) -> Option<PathBuf> {
         self.dir.as_ref().map(|d| d.join("blackbox"))
     }
@@ -138,6 +147,8 @@ impl Engine {
                 self.finish_job(job, out);
             }
             out.live_job = self.jobs.live();
+        } else {
+            out.live_job = None;
         }
         if self.ticks == REPORT_TICK
             && let Some(prev) = self.prev.take()

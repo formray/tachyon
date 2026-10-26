@@ -137,6 +137,8 @@ pub struct Forecaster {
     warning_on: bool,
     last: Forecast,
     tick: u32,
+    /// Warning horizon in seconds; None = `HORIZON_S`, Some(0) = no warnings.
+    horizon: Option<f64>,
 }
 
 fn is_background(name: &str, category: &str) -> bool {
@@ -186,6 +188,15 @@ impl Forecaster {
         &self.last
     }
 
+    /// Warn when VRAM would be full within `minutes` (0 = never warn). Applies from the next evaluation.
+    pub fn set_horizon_minutes(&mut self, minutes: u32) {
+        self.horizon = Some(minutes as f64 * 60.0);
+    }
+
+    fn horizon_s(&self) -> f64 {
+        self.horizon.unwrap_or(HORIZON_S)
+    }
+
     pub fn current(&self) -> &Forecast {
         &self.last
     }
@@ -208,7 +219,7 @@ impl Forecaster {
         let confident = match (f.trend, s.vram_mb, s.vram_total_mb) {
             (Some(tr), Some(u), Some(tot)) if tr.slope_mbs >= 5.0 && tr.agreement >= 0.8 && tot > u => {
                 let secs = (tot - u) as f64 / tr.slope_mbs;
-                (secs <= HORIZON_S).then_some(secs)
+                (secs <= self.horizon_s()).then_some(secs)
             }
             _ => None,
         };
@@ -365,5 +376,23 @@ mod tests {
         assert_eq!(fmt_eta(30.0), "under a minute");
         assert_eq!(fmt_eta(185.0), "~3 min");
         assert_eq!(fmt_eta(4200.0), "~1 h 10 min");
+    }
+
+    #[test]
+    fn horizon_from_settings() {
+        // full in ~5 min: a 3-minute horizon stays quiet, 0 turns warnings off, 10 warns
+        let run = |m: Option<u32>| {
+            let mut f = Forecaster::default();
+            if let Some(m) = m {
+                f.set_horizon_minutes(m);
+            }
+            for t in 0..90 {
+                let u = 10000.0 + 20.0 * t as f32;
+                f.push(&s(t, u, vec![py(u - 2000.0, 90)]), 5);
+            }
+            f.current().warning.is_some()
+        };
+        assert!(run(None) && run(Some(10)));
+        assert!(!run(Some(3)) && !run(Some(0)));
     }
 }

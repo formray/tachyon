@@ -21,7 +21,6 @@ const BUBBLE_R: f32 = 26.0;
 const BUBBLE_PAD: f32 = 44.0;
 /// gap between the bubble and Hex's halo (the two tail dots sit in it)
 const BUBBLE_GAP: f32 = 30.0;
-const BUBBLE_IDLE_SECS: u64 = 8;
 const BUBBLE_ANIM_MS: f32 = 160.0;
 const HIGHLIGHT: Rgb = (169, 246, 255);
 const WARN: Rgb = (255, 210, 154);
@@ -91,6 +90,8 @@ pub(super) struct Companion {
     b_origin: POINT,
     b_last_hover: Instant,
     b_left: bool,
+    /// the bubble closes after this many seconds without the pointer (0 = stays open)
+    pub b_close_secs: u64,
 }
 
 /// Links in the bubble's bottom row.
@@ -221,6 +222,7 @@ impl Companion {
             b_pad: 0,
             b_origin: POINT { x: 0, y: 0 },
             b_last_hover: Instant::now(),
+            b_close_secs: cfg.bubble_close_secs,
             b_left: true,
         })
     }
@@ -463,7 +465,7 @@ impl Companion {
         let over = p.x >= r.left && p.x < r.right && p.y >= r.top && p.y < r.bottom;
         if over {
             self.b_last_hover = Instant::now();
-        } else if self.b_last_hover.elapsed().as_secs() >= BUBBLE_IDLE_SECS {
+        } else if self.b_close_secs > 0 && self.b_last_hover.elapsed().as_secs() >= self.b_close_secs {
             self.close_bubble();
         }
     }
@@ -1015,7 +1017,7 @@ impl App {
 
     /// Poll tick in companion mode: sprite state/colours, and the bubble while it is open.
     pub(super) fn hex_poll(&mut self) {
-        if self.s.snap.insights.report_new {
+        if self.s.snap.insights.report_new && self.cfg.hex_announce {
             self.hex_announce();
         }
         let now = self.now_ms();

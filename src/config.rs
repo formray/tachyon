@@ -58,6 +58,12 @@ pub struct Config {
     pub currency: String,
     /// Let local AI agents read Tachyon's live state through `tachyon mcp` (read-only, this PC only).
     pub agent_api: bool,
+    /// Hex opens its bubble by itself to announce a crash report (once per report).
+    pub hex_announce: bool,
+    /// Hex's bubble closes by itself after this many seconds without the pointer on it (0 = stays open).
+    pub bubble_close_secs: u64,
+    /// Warn when VRAM would be full within this many minutes at the current rate (0 = no forecast warning).
+    pub vram_forecast_minutes: u32,
     pub gpu: GpuThresholds,
     pub window: WindowCfg,
     /// "Who is using the GPU": first matching rule wins; unmatched processes are "Other".
@@ -427,6 +433,9 @@ impl Default for Config {
             price_per_kwh: None,
             currency: "EUR".into(),
             agent_api: false,
+            hex_announce: true,
+            bubble_close_secs: 8,
+            vram_forecast_minutes: 15,
             gpu: GpuThresholds::default(),
             window: WindowCfg::default(),
             process_rules: default_process_rules(),
@@ -684,6 +693,9 @@ mod tests {
         assert_eq!(q.price(), Some((0.3, "£".to_string())));
         assert!(q.agent_api);
         assert!(!s.contains("price_per_kwh"), "unset price is not written");
+        // Settings-page keys keep the 1.0 behaviour by default
+        assert!(p.hex_announce);
+        assert_eq!((p.bubble_close_secs, p.vram_forecast_minutes), (8, 15));
     }
 
     #[test]

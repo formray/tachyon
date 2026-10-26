@@ -203,6 +203,18 @@ impl Publisher {
         }
     }
 
+    /// The shared memory block exists (always false off Windows).
+    pub fn live(&self) -> bool {
+        #[cfg(windows)]
+        {
+            self.map.is_some()
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    }
+
     /// Publish every second call (the sampler ticks about once a second).
     pub fn tick(&mut self, snap: &Snapshot) {
         self.tick = self.tick.wrapping_add(1);

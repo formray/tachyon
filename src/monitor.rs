@@ -297,6 +297,29 @@ impl Sampler {
         }
     }
 
+    /// Settings changed while running (the Settings page). Render roots are rescanned on the next
+    /// tick, the agent API starts or stops publishing, and the engine takes what it can live.
+    pub fn apply(&mut self, cfg: Config) {
+        if cfg.render_roots != self.cfg.render_roots || cfg.scan_depth != self.cfg.scan_depth {
+            self.rs = RenderState { cands: vec![], last_scan: None, rate: Default::default() };
+        }
+        match (cfg.agent_api, self.agent.is_some()) {
+            (true, false) => self.agent = Some(crate::agent::Publisher::new()),
+            (false, true) => self.agent = None,
+            _ => {}
+        }
+        if let Some(n) = self.nvml.as_mut() {
+            n.pcie = cfg.pcie;
+        }
+        self.engine.apply(&cfg);
+        self.cfg = cfg;
+    }
+
+    /// The agent API is publishing (`agent_api = true` and the shared memory exists).
+    pub fn agent_live(&self) -> bool {
+        self.agent.as_ref().is_some_and(|a| a.live())
+    }
+
     /// Clean exit: record a running job and mark the flight recorder session clean.
     pub fn close(&mut self) {
         self.engine.close(crate::telemetry::now_ms(), &mut self.snap.insights);
