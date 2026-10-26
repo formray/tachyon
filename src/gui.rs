@@ -1,4 +1,4 @@
-//! Tachyon v5 "Aurora" UI. One borderless layered window (see present.rs) that is either the
+//! Tachyon "Aurora" UI. One borderless layered window (see present.rs) that is either the
 //! island capsule or the expanded panel. Each frame = software glass body (glass.rs: shadow,
 //! tint, Aurora colour field, progress level) + a cached foreground (tiny-skia shapes and
 //! DirectWrite text), composited and handed to UpdateLayeredWindow.
@@ -1214,7 +1214,8 @@ impl App {
                     eprintln!("[tachyon] mem {k:<24} WS {ws:6.1} MB  private {pv:6.1} MB");
                 }
                 eprintln!(
-                    "[tachyon] v5 config {} | mode {} (hex atlas {}) | windows build {} | glass {} (config \"{}\", blur api {}) | transparency effects {} | layered ULW_ALPHA | scale {:.2} text {}",
+                    "[tachyon] {} config {} | mode {} (hex atlas {}) | windows build {} | glass {} (config \"{}\", blur api {}) | transparency effects {} | layered ULW_ALPHA | scale {:.2} text {}",
+                    env!("CARGO_PKG_VERSION"),
                     self.path.display(),
                     self.mode.as_str(),
                     self.comp.as_ref().map(|c| c.atlas_key()).unwrap_or("-"),
