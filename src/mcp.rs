@@ -338,24 +338,78 @@ impl Source for Live {
 pub fn serve(cfg: Config) {
     let mut src = Live::new(cfg);
     let stdin = std::io::stdin();
-    let mut out = std::io::stdout().lock();
-    for line in stdin.lock().lines() {
-        let Ok(line) = line else { break };
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
+    serve_io(stdin.lock(), std::io::stdout().lock(), &mut src);
+}
+
+/// Longest request line read; longer lines are answered with an error and skipped.
+pub const MAX_LINE: usize = 1 << 20;
+/// Most requests answered from one JSON-RPC batch.
+pub const MAX_BATCH: usize = 64;
+
+/// Read one line of at most `MAX_LINE` bytes. `Ok(None)` = end of input; `Err(())` = too long
+/// (the rest of the line has been skipped).
+fn read_line_capped(input: &mut impl BufRead, buf: &mut Vec<u8>) -> std::io::Result<Option<Result<(), ()>>> {
+    buf.clear();
+    let mut too_long = false;
+    loop {
+        let chunk = input.fill_buf()?;
+        if chunk.is_empty() {
+            return Ok(if buf.is_empty() && !too_long { None } else { Some(if too_long { Err(()) } else { Ok(()) }) });
         }
-        let reply = match serde_json::from_str::<Value>(line) {
-            Ok(Value::Array(batch)) => {
-                let r: Vec<Value> = batch.iter().filter_map(|m| handle(m, &mut src)).collect();
-                (!r.is_empty()).then_some(Value::Array(r))
+        let (take, done) = match chunk.iter().position(|b| *b == b'\n') {
+            Some(i) => (i + 1, true),
+            None => (chunk.len(), false),
+        };
+        if !too_long {
+            if buf.len() + take > MAX_LINE + 1 {
+                too_long = true;
+                buf.clear();
+            } else {
+                buf.extend_from_slice(&chunk[..take]);
             }
-            Ok(m) => handle(&m, &mut src),
-            Err(_) => Some(err(&Value::Null, -32700, "Parse error")),
+        }
+        input.consume(take);
+        if done {
+            return Ok(Some(if too_long { Err(()) } else { Ok(()) }));
+        }
+    }
+}
+
+/// The JSON-RPC loop over any reader and writer: one request (or batch) per line.
+/// Bad UTF-8, garbage and oversized lines get an error reply; the server keeps going.
+pub fn serve_io(mut input: impl BufRead, mut out: impl Write, src: &mut dyn Source) {
+    let mut buf = Vec::with_capacity(4096);
+    loop {
+        let reply = match read_line_capped(&mut input, &mut buf) {
+            Err(_) | Ok(None) => break,
+            Ok(Some(Err(()))) => Some(err(&Value::Null, -32600, "Request too large")),
+            Ok(Some(Ok(()))) => {
+                let Ok(line) = std::str::from_utf8(&buf) else {
+                    let r = err(&Value::Null, -32700, "Parse error: not UTF-8");
+                    let _ = writeln!(out, "{r}");
+                    let _ = out.flush();
+                    continue;
+                };
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                match serde_json::from_str::<Value>(line) {
+                    Ok(Value::Array(batch)) if batch.is_empty() => Some(err(&Value::Null, -32600, "Empty batch")),
+                    Ok(Value::Array(batch)) if batch.len() > MAX_BATCH => Some(err(&Value::Null, -32600, "Batch too large")),
+                    Ok(Value::Array(batch)) => {
+                        let r: Vec<Value> = batch.iter().filter_map(|m| handle(m, src)).collect();
+                        (!r.is_empty()).then_some(Value::Array(r))
+                    }
+                    Ok(m) => handle(&m, src),
+                    Err(_) => Some(err(&Value::Null, -32700, "Parse error")),
+                }
+            }
         };
         if let Some(r) = reply {
-            let _ = writeln!(out, "{r}");
-            let _ = out.flush();
+            if writeln!(out, "{r}").and_then(|_| out.flush()).is_err() {
+                break;
+            }
         }
     }
 }
@@ -458,5 +512,56 @@ mod tests {
         let r = call(&mut f, "get_status", json!({}));
         assert_eq!(r["isError"], true);
         assert!(r["content"][0]["text"].as_str().unwrap().contains("agent_api = true"));
+    }
+
+    fn serve_bytes(input: &[u8]) -> Vec<Value> {
+        let mut f = Fake { on: true, jobs: vec![job("a", 1, 60.0)] };
+        let mut out = Vec::new();
+        serve_io(std::io::Cursor::new(input.to_vec()), &mut out, &mut f);
+        String::from_utf8(out).expect("replies are UTF-8").lines().map(|l| serde_json::from_str(l).expect("each reply is JSON")).collect()
+    }
+
+    #[test]
+    fn hostile_input_gets_errors_and_the_server_keeps_going() {
+        let ping = br#"{"jsonrpc":"2.0","id":7,"method":"ping"}"#;
+        let mut input = Vec::new();
+        input.extend_from_slice(b"\xff\xfe not utf-8\n");
+        input.extend_from_slice(b"garbage {{{\n");
+        input.extend_from_slice(&vec![b'x'; MAX_LINE + 100]);
+        input.push(b'\n');
+        input.extend_from_slice(format!("[{}]\n", vec![std::str::from_utf8(ping).unwrap(); MAX_BATCH + 1].join(",")).as_bytes());
+        input.extend_from_slice(b"[]\n");
+        input.extend_from_slice(&[b'['; 10_000]);
+        input.push(b'\n');
+        input.extend_from_slice(b"42\n\"str\"\nnull\n{}\n");
+        input.extend_from_slice(ping);
+        input.push(b'\n');
+        let r = serve_bytes(&input);
+        let codes: Vec<i64> = r.iter().map(|v| v["error"]["code"].as_i64().unwrap_or(0)).collect();
+        assert_eq!(&codes[..6], &[-32700, -32700, -32600, -32600, -32600, -32700], "{r:?}");
+        assert_eq!(r.last().unwrap()["id"], 7, "still answering after all that");
+        assert_eq!(r.last().unwrap()["result"], json!({}));
+    }
+
+    #[test]
+    fn random_bytes_never_panic_or_hang() {
+        let mut rng = crate::fuzz::Rng::new(0x7ac4);
+        let seeds: [&[u8]; 4] = [
+            br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_history","arguments":{"n":5}}}"#,
+            br#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_blackbox","arguments":{"minutes":1e308}}}"#,
+            br#"{"jsonrpc":"2.0","id":3,"method":"initialize","params":{"protocolVersion":null}}"#,
+            br#"[{"jsonrpc":"2.0","id":4,"method":"tools/list"},{"id":null}]"#,
+        ];
+        for round in 0..400 {
+            let mut input = Vec::new();
+            for _ in 0..4 {
+                let k = rng.below(seeds.len());
+                input.extend(rng.mutate(seeds[k]));
+                input.push(b'\n');
+            }
+            let t = std::time::Instant::now();
+            let _ = serve_bytes(&input);
+            assert!(t.elapsed().as_secs() < 5, "round {round} took too long");
+        }
     }
 }

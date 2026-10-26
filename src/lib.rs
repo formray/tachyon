@@ -7,6 +7,8 @@ pub mod config;
 pub mod events;
 pub mod explain;
 pub mod forecast;
+#[doc(hidden)]
+pub mod fuzz;
 pub mod glass;
 pub mod hex;
 pub mod history;
