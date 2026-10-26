@@ -27,3 +27,5 @@ pub mod sysinfo;
 pub mod telemetry;
 pub mod theme;
 pub mod voice;
+#[cfg(windows)]
+pub mod winsec;

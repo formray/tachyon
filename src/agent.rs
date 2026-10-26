@@ -130,13 +130,16 @@ pub unsafe fn read_frame(p: *const u8, len: usize) -> Option<Vec<u8>> {
 
 #[cfg(windows)]
 mod win {
-    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Memory::*;
 
     pub struct Map {
         h: HANDLE,
         view: MEMORY_MAPPED_VIEW_ADDRESS,
     }
+
+    /// Standard right to read an object's security descriptor (winnt.h).
+    const READ_CONTROL: u32 = 0x0002_0000;
 
     fn name() -> Vec<u16> {
         super::MAP_NAME.encode_utf16().chain([0]).collect()
@@ -145,9 +148,16 @@ mod win {
     impl Map {
         pub fn create() -> Option<Map> {
             unsafe {
-                let h =
-                    CreateFileMappingW(INVALID_HANDLE_VALUE, std::ptr::null(), PAGE_READWRITE, 0, super::MAP_SIZE as u32, name().as_ptr());
+                // only this user (and SYSTEM) may open it; see winsec
+                let sa = crate::winsec::Private::new();
+                let sa_ptr = sa.as_ref().map_or(std::ptr::null(), |s| s.ptr());
+                let h = CreateFileMappingW(INVALID_HANDLE_VALUE, sa_ptr, PAGE_READWRITE, 0, super::MAP_SIZE as u32, name().as_ptr());
                 if h.is_null() {
+                    return None;
+                }
+                // a mapping that already existed and is not ours (squatting): do not publish into it
+                if GetLastError() == ERROR_ALREADY_EXISTS && !crate::winsec::owned_by_me(h) {
+                    CloseHandle(h);
                     return None;
                 }
                 let view = MapViewOfFile(h, FILE_MAP_WRITE, 0, 0, super::MAP_SIZE);
@@ -160,8 +170,14 @@ mod win {
         }
         pub fn open_read() -> Option<Map> {
             unsafe {
-                let h = OpenFileMappingW(FILE_MAP_READ, 0, name().as_ptr());
+                // READ_CONTROL to check the owner
+                let h = OpenFileMappingW(FILE_MAP_READ | READ_CONTROL, 0, name().as_ptr());
                 if h.is_null() {
+                    return None;
+                }
+                // only trust a snapshot published by this user
+                if !crate::winsec::owned_by_me(h) {
+                    CloseHandle(h);
                     return None;
                 }
                 let view = MapViewOfFile(h, FILE_MAP_READ, 0, 0, super::MAP_SIZE);
