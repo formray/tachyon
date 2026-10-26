@@ -574,13 +574,26 @@ pub fn config_path() -> PathBuf {
     }
     let dir = std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf)).unwrap_or_else(|| PathBuf::from("."));
     let p = pick_config(&dir);
-    // a read-only exe folder (Program Files): the settings live in the data folder
     if !p.exists()
-        && let Some(alt) = data_dir().map(|d| d.join("tachyon.toml")).filter(|a| a.exists())
+        && let Some(alt) = data_dir().map(|d| d.join("tachyon.toml"))
     {
-        return alt;
+        // a package manager replaces the exe's folder on every update: settings live in the
+        // data folder from the start
+        if managed_install(&dir) {
+            return alt;
+        }
+        // a read-only exe folder (Program Files): the settings moved there on first start
+        if alt.exists() {
+            return alt;
+        }
     }
     p
+}
+
+/// The exe was installed by winget (portable) or Scoop, whose upgrades replace its folder.
+pub fn managed_install(exe_dir: &Path) -> bool {
+    let s = exe_dir.to_string_lossy().replace('/', "\\").to_lowercase();
+    s.contains("\\winget\\packages\\") || s.contains("\\scoop\\apps\\")
 }
 
 /// tachyon.toml wins; a legacy rig_monitor.toml is used only if tachyon.toml does not exist.
