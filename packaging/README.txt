@@ -19,6 +19,9 @@ New in 1.1.0
 - Why did it crash? The crash report now names the probable cause with a rough
   percentage (unstable RAM / EXPO, GPU overclock, power supply, heat, driver
   timeout or the app itself), the evidence behind it and one thing to try.
+  If the PC simply switched off while idle, it says a power cut or a manual
+  power-off is more likely than the graphics card, and it tells you when the
+  BIOS settings look reset (memory slower than standard, EXPO off).
   Estimates only: Tachyon never changes a setting.
 - Two new read-only agent tools: preflight and diagnose_crash.
 
