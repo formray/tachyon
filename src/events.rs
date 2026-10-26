@@ -37,6 +37,8 @@ const WER_APP: &str = "Windows Error Reporting";
 /// Kernel-General: 1 = the system time was changed (`code`: seconds, new minus old), 12 = the
 /// operating system started, 13 = it shut down.
 pub const KERNEL_GENERAL: &str = "Microsoft-Windows-Kernel-General";
+/// EventLog 6008's last sign of life this much older than the flight recorder's last sample is stale.
+pub const STALE_ALIVE_MS: i64 = 5 * 60_000;
 /// Clock changes smaller than this are ordinary time synchronisation, not kept.
 const CLOCK_CHANGE_MIN_S: i64 = 60;
 
@@ -103,6 +105,21 @@ impl SysEvent {
             return None;
         }
         chrono::DateTime::parse_from_rfc3339(self.code.as_deref()?).ok().map(|d| d.timestamp_millis())
+    }
+
+    /// `describe`, with EventLog 6008's last sign of life marked as stale when Tachyon's flight
+    /// recorder saw the PC running well after it (Windows writes that time only now and then, so
+    /// after a power cut it can be tens of minutes old).
+    pub fn describe_with_recorder(&self, recorder_last_ms: Option<i64>) -> String {
+        let text = self.describe();
+        match (self.last_alive_ms(), recorder_last_ms) {
+            (Some(a), Some(r)) if r - a > STALE_ALIVE_MS => format!(
+                "{} (stale: Tachyon's flight recorder shows activity until {}, so it is not when the PC stopped.)",
+                text.trim_end_matches('.'),
+                SysEvent { t_ms: r, ..self.clone() }.local().format("%H:%M:%S")
+            ),
+            _ => text,
+        }
     }
 
     /// Logged while Windows starts (the boot sequence), not by the session before it.
@@ -488,6 +505,11 @@ mod tests {
         assert_eq!(e.code.as_deref(), Some("2026-10-26T17:09:33.500Z"));
         assert_eq!(e.last_alive_ms(), Some(chrono::DateTime::parse_from_rfc3339("2026-10-26T17:09:33.5Z").unwrap().timestamp_millis()));
         assert!(e.describe().contains("last sign of life was at"), "{}", e.describe());
+        let alive = e.last_alive_ms().unwrap();
+        assert_eq!(e.describe_with_recorder(Some(alive + 60_000)), e.describe(), "a recent last sign of life is kept as is");
+        assert_eq!(e.describe_with_recorder(None), e.describe());
+        let stale = e.describe_with_recorder(Some(alive + 38 * 60_000));
+        assert!(stale.contains("(stale: Tachyon's flight recorder shows activity until") && !stale.contains(".."), "{stale}");
         let k = parse_event_xml(KG1).unwrap();
         assert_eq!(k.clock_change_s(), Some(-3600));
         assert_eq!(k.describe(), "The system clock was changed by -1 h 0 min (Kernel-General 1).");

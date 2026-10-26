@@ -1,6 +1,6 @@
 # Changelog
 
-## v1.1.0 (unreleased)
+## v1.1.0
 
 Two new answers, both worked out from what Tachyon already records. Read-only as before.
 
@@ -20,14 +20,15 @@ Two new answers, both worked out from what Tachyon already records. Read-only as
 - `diagnose_crash` with `around` (or without a crash report) now uses the flight recorder for the minutes before the stop: GPU load, power against the limit, temperatures, the processes on the GPU and whether the PC was idle (`before_the_stop`). It no longer says there are no readings when the recorder has them.
 - A power-off with no blue screen while the GPU was idle and at low power now points to *a whole-system power loss or a manual power-off* (new cause, with advice on the socket, PSU switch and what was plugged in or pressed, e.g. the BIOS FlashBack port); *GPU power delivery or the PSU* keeps only a small share. At full load it still points to the PSU.
 - `around` is matched against when the PC actually stopped (the recorder's last sample, Windows' last log entry and EventLog 6008's last sign of life), not the restart time, with `tolerance_minutes` (default 90); restart reports logged up to 3 h later are found. The answer gives the stop window (`stopped`), what matched and the other restarts nearby.
+- Windows' own times from before the stop are not taken for the stop when the flight recorder ran later: EventLog 6008's "last sign of life" (written only now and then, so 17:31:14 on 26 Oct for a stop at 18:09:04) is marked *stale* in the events list and the report timeline, and `last_log_entry` gets a `last_log_entry_note` saying it is earlier than the recorder's last sample.
 - The clock after the restart is checked against the recording: a restart logged an hour after the last sign of life, or a Windows clock correction afterwards (Kernel-General 1), is noted in `clock_note`.
 - RAM running below its standard (JEDEC) speed, e.g. 3600 MT/s on 4800 modules, is flagged as *BIOS likely reset to safe defaults (EXPO/XMP off)*, together with a clock that jumped and a slow BIOS start (Windows' "Last BIOS time") when known (`diagnosis.hints`, the report view and the text export).
 - `get_blackbox` reads older data: `since`/`until` (local time or Unix ms) or `session: "previous"`/`"current"`, plus a plain `summary` of the last minute, `clock_limits` in words and the `sessions` on disk.
-- Process names: 1.0 recorder files wrote the third name over the record checksum, so it read back with garbage (`CrossDeviceResume.ex\x03\xdc,m`). Old files now read back only its 20 real bytes, on whole UTF-8 characters. New ring files (`TACHYBB2`, 256-byte records) keep names up to 44 bytes; 1.0 files are still read. The flight recorder now takes about 460 KB on disk.
+- Process names: 1.0 recorder files wrote the third name over the record checksum, so it read back with garbage (`CrossDeviceResume.ex\x03\xdc,m`). Old files now read back only its 20 real bytes, on whole UTF-8 characters, and a name cut inside `.exe` gets its extension back (`CrossDeviceResume.exe`). New ring files (`TACHYBB2`, 256-byte records) keep names up to 44 bytes; 1.0 files are still read. The flight recorder now takes about 460 KB on disk.
 - NVML clock limit 0x400 is named (*reliability policy*), with the other known reasons.
 
 **Build and tests**
-- 168 tests on Linux, 171 under wine (132 in 1.0.1): diagnosis rules incl. the real EXPO case, the prediction and its thresholds, resolution parsing (fuzzed), job hints from a projects tree, SMBIOS parsing, the new MCP tools, and a regression on the real 26 Oct recording (`tests/samples/blackbox_2026-10-26_idle_power_loss.bin`, the last 5 minutes; process names only, no paths).
+- 169 tests on Linux, 172 under wine (132 in 1.0.1): diagnosis rules incl. the real EXPO case, the prediction and its thresholds, resolution parsing (fuzzed), job hints from a projects tree, SMBIOS parsing, the new MCP tools, and a regression on the real 26 Oct recording (`tests/samples/blackbox_2026-10-26_idle_power_loss.bin`, the last 5 minutes; process names only, no paths).
 - The fake NVML has an `oc` scenario; `tests/wine.sh` can run on its own prefix/display; `tests/shots_v1_1.sh` makes the 1.1 screenshots.
 
 ## v1.0.1

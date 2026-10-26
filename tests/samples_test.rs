@@ -187,7 +187,7 @@ fn real_recording_before_the_26_oct_power_loss() {
     let mut names: Vec<&str> = s.iter().flat_map(|x| x.procs.iter().map(|p| p.name.as_str())).collect();
     names.sort_unstable();
     names.dedup();
-    assert!(names.contains(&"CrossDeviceResume.ex") && names.contains(&"dwm.exe"), "{names:?}");
+    assert!(names.contains(&"CrossDeviceResume.exe") && names.contains(&"dwm.exe"), "{names:?}");
     assert!(names.iter().all(|n| n.chars().all(|c| !c.is_control() && c != '\u{fffd}') && n.len() <= 24), "{names:?}");
     let last = s.last().unwrap().t_ms;
     let lm: Vec<_> = s.iter().filter(|x| x.t_ms >= last - 60_000).cloned().collect();

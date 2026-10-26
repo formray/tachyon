@@ -264,7 +264,7 @@ pub fn build_with(
         timeline.push(Line { t_ms: s.t_ms, text: format!("Last record: {}", summary(std::slice::from_ref(s))) });
     }
     for e in events.iter().filter(|e| e.t_ms > from) {
-        timeline.push(Line { t_ms: e.t_ms, text: e.describe() });
+        timeline.push(Line { t_ms: e.t_ms, text: e.describe_with_recorder(prev.samples.last().map(|s| s.t_ms)) });
     }
     if let Some(b) = boot_ms.filter(|_| rebooted) {
         timeline.push(Line { t_ms: b, text: "Windows started again.".into() });
@@ -282,7 +282,10 @@ pub fn build_with(
         peaks: peaks(&prev.samples),
         vram_holder: holder,
         timeline,
-        events: events.into_iter().map(|e| EventLine { text: e.describe(), event: e }).collect(),
+        events: events
+            .into_iter()
+            .map(|e| EventLine { text: e.describe_with_recorder(prev.samples.last().map(|s| s.t_ms)), event: e })
+            .collect(),
         events_note,
         samples: prev.samples.len(),
         recorded_from_ms: prev.samples.first().map(|s| s.t_ms),

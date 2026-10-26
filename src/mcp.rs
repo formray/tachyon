@@ -563,14 +563,24 @@ fn diagnose_from_event_log(args: &Value, src: &mut dyn Source, now: i64) -> Resu
         }),
         _ => None,
     };
+    let rec_last = stop.recorder_ms.filter(|_| rec_ok);
     let fmt_ev = |e: &SysEvent| match logged_at.iter().find(|(t, _)| *t == e.t_ms) {
         Some((_, raw)) => format!(
             "{}  {} (logged as {}, with the clock that was wrong)",
             local_text(e.t_ms, "%m-%d %H:%M:%S"),
-            e.describe(),
+            e.describe_with_recorder(rec_last),
             local_text(*raw, "%H:%M:%S")
         ),
-        None => format!("{}  {}", local_text(e.t_ms, "%m-%d %H:%M:%S"), e.describe()),
+        None => format!("{}  {}", local_text(e.t_ms, "%m-%d %H:%M:%S"), e.describe_with_recorder(rec_last)),
+    };
+    // Windows' last log entry before the restart, when the recorder ran well past it, is just the
+    // last thing Windows happened to write, not the stop
+    let log_note = match (stop.log_ms, rec_last) {
+        (Some(l), Some(r)) if r - l > crate::events::STALE_ALIVE_MS => Some(format!(
+            "Earlier than the flight recorder's last sample at {}: the last thing Windows wrote before the stop, not when the PC stopped.",
+            local_text(r, "%H:%M:%S")
+        )),
+        _ => None,
     };
     let note = if window.is_empty() {
         let why = match stop.recorder_ms {
@@ -602,6 +612,7 @@ fn diagnose_from_event_log(args: &Value, src: &mut dyn Source, now: i64) -> Resu
         "diagnosis": d,
         "events": ev.iter().map(fmt_ev).collect::<Vec<_>>(),
         "last_log_entry": stop.log_ms.map(|t| local_text(t, "%Y-%m-%d %H:%M:%S")),
+        "last_log_entry_note": log_note,
         "other_restarts": list(&stops.iter().filter(|s| s.first != first).cloned().collect::<Vec<_>>()),
         "note": note,
     }))
@@ -1302,7 +1313,7 @@ mod tests {
         assert!(b["last_minute"]["power_w"]["max"].as_f64().unwrap() < 30.0, "{txt}");
         let sentence = b["sentence"].as_str().unwrap();
         assert!(
-            sentence.contains("the PC was idle") && sentence.contains("CrossDeviceResume.ex") && sentence.contains("reliability policy"),
+            sentence.contains("the PC was idle") && sentence.contains("CrossDeviceResume.exe") && sentence.contains("reliability policy"),
             "{sentence}"
         );
         assert!(!txt.contains('\u{fffd}'), "no garbage characters");
@@ -1405,6 +1416,27 @@ mod tests {
         let events: Vec<&str> = r["events"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
         assert!(events.iter().any(|e| e.contains("Kernel-Power 41") && e.contains("(logged as")), "{txt}");
         assert!(events.iter().any(|e| e.contains("Kernel-General 1")), "{txt}");
+        // EventLog 6008's 17:31:14 and the last log entry at 17:15:00 are older than the recorder's
+        // 18:09:04: neither is presented as the stop
+        let stop_hms = local_text(last, "%H:%M:%S");
+        let e6008_line = events.iter().find(|e| e.contains("EventLog 6008")).expect(&txt);
+        assert!(e6008_line.contains(&local_text(real((17, 31, 14)), "%H:%M:%S")), "{txt}");
+        assert!(
+            e6008_line.contains(&format!(
+                "(stale: Tachyon's flight recorder shows activity until {stop_hms}, so it is not when the PC stopped.)"
+            )),
+            "{txt}"
+        );
+        let log_note = r["last_log_entry_note"].as_str().expect(&txt);
+        assert!(log_note.contains(&stop_hms) && log_note.contains("not when the PC stopped"), "{txt}");
+        assert!(r["stopped"].as_str().unwrap().contains(&stop_hms) && r["stopped"].as_str().unwrap().contains("flight recorder"), "{txt}");
+        for k in ["stopped", "matched", "clock_note"] {
+            let v = r[k].as_str().unwrap_or_default();
+            assert!(
+                !v.contains(&local_text(real((17, 31, 14)), "%H:%M:%S")) && !v.contains(&local_text(real((17, 15, 0)), "%H:%M:%S")),
+                "{k}: {txt}"
+            );
+        }
         assert_eq!(r["before_the_stop"]["idle"], true, "{txt}");
         let d = &r["diagnosis"];
         assert_eq!(d["causes"][0]["suspect"], "power_cut", "{txt}");

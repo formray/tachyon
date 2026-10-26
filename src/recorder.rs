@@ -244,7 +244,14 @@ fn decode_sized(b: &[u8], rec: usize) -> Option<(u32, Sample)> {
         let at = r.1;
         // format 1: the last 4 bytes of the third name are the checksum, not part of the name
         let keep = if slot == PROC_SLOTS - 1 { name_len.min(rec - 4 - at) } else { name_len };
-        let name = read_name(&b[at..at + keep]);
+        let mut name = read_name(&b[at..at + keep]);
+        // a format 1 name cut by the checksum inside ".exe" gets its extension back
+        // (`CrossDeviceResume.ex` -> `CrossDeviceResume.exe`); other cut names stay as read
+        if keep < name_len && name.len() == keep {
+            if let Some(rest) = [".ex", ".e", "."].iter().find(|x| name.ends_with(**x)).map(|x| &".exe"[x.len()..]) {
+                name.push_str(rest);
+            }
+        }
         r.1 += name_len.min(rec - at);
         if pid == 0 && name.is_empty() {
             continue;
@@ -594,7 +601,17 @@ mod tests {
             let old = encode_v1(&three("CrossDeviceResume.exe"), seq);
             let (_, d) = decode(&old).unwrap();
             let names: Vec<&str> = d.procs.iter().map(|p| p.name.as_str()).collect();
-            assert_eq!(names, ["dwm.exe", "ShellHost.exe", "CrossDeviceResume.ex"]);
+            assert_eq!(names, ["dwm.exe", "ShellHost.exe", "CrossDeviceResume.exe"], "a cut \".exe\" is completed");
+            for (full, read) in [
+                ("Nineteen_chars_.exe", "Nineteen_chars_.exe"),
+                ("Eighteen_chars.exe", "Eighteen_chars.exe"),
+                ("TwentyOne_chars_.exe", "TwentyOne_chars_.exe"),
+                ("Twenty_two_chars_a.exe", "Twenty_two_chars_a.exe"),
+                ("a_very_long_render_name.exe", "a_very_long_render_n"),
+            ] {
+                let (_, d) = decode(&encode_v1(&three(full), seq)).unwrap();
+                assert_eq!(d.procs[2].name, read, "{full}");
+            }
             // a multi-byte character cut by the checksum is dropped, not shown as U+FFFD
             let (_, d) = decode(&encode_v1(&three("Résumé_Studio_Pro_ü.exe"), seq)).unwrap();
             let n = &d.procs[2].name;
@@ -622,7 +639,7 @@ mod tests {
         std::fs::write(d.join("blackbox_b.bin"), &file).unwrap();
         let v = read_ring(&d.join("blackbox_b.bin"));
         assert_eq!(v.len(), 3);
-        assert_eq!(v[2].procs[2].name, "CrossDeviceResume.ex");
+        assert_eq!(v[2].procs[2].name, "CrossDeviceResume.exe");
         // the new format is read as well, and a 1.0 record inside a new file is not
         let mut f2 = MAGIC.to_vec();
         f2.resize(HEADER, 0);

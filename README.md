@@ -28,7 +28,7 @@ the [changelog](CHANGELOG.md#previews).
 
 ## Features
 
-New in 1.1 (unreleased):
+New in 1.1:
 
 - **Pre-render check: "will this job fit?".** When a render job starts, Tachyon looks
   for earlier runs of the same job (then the same project, then a similar name) at the
@@ -55,6 +55,9 @@ New in 1.1 (unreleased):
   while the GPU was idle points to a power cut or a manual power-off rather than the GPU's
   power draw; RAM running below its standard speed, a clock that jumped at the restart and
   a slow BIOS start are reported as signs that the BIOS settings were reset.
+  Times Windows wrote before the stop that are older than the flight recorder's last
+  sample (EventLog 6008's "last sign of life", the last log entry) are marked as stale,
+  never given as the moment the PC stopped.
 
 New in 1.0, all worked out on the PC from the readings Tachyon already takes (no extra
 polling, no cloud, no AI model):
@@ -520,7 +523,7 @@ under wine.
   monitor).
 - **Laptops with switchable graphics (Optimus):** reading the driver every
   second can keep the NVIDIA GPU awake on battery. Set `poll_ms = 2000` or quit
-  Tachyon on battery; an automatic pause is not in 1.0.1.
+  Tachyon on battery; an automatic pause is not in 1.1.
 - **English only** for now.
 - **Unsigned exe:** Windows SmartScreen may say *Windows protected your PC*
   on first start; choose *More info → Run anyway*, after checking the file
