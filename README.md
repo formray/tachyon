@@ -35,8 +35,8 @@ New in 1.2 (draft, not released yet):
   second fixed-size ring next to the flight recorder (15 minutes, about 352 KB). After a
   crash, `diagnose_crash` shows the last 30 s at that resolution (`last_seconds`): a
   +200 W step within 100 ms, power brake or a hardware slowdown just before the stop are
-  named as hints. Measured on an RTX 5080: no measurable extra CPU (the whole Tachyon
-  stays around 1% of one core), one extra thread.
+  named as hints. Measured on an RTX 5080: no extra CPU above the run-to-run noise (the whole Tachyon
+  stays at 1-1.7% of one core, as 1.1.0), one extra thread.
 - **PCIe link history.** The link against the best the GPU and slot can do. Dropping to
   Gen1/Gen2 at idle is normal and only counted; a narrower link (x8 in an x16 slot) or a
   lower generation under load is logged as *degraded*, with the recovery. In the status,
