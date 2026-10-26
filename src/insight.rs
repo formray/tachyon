@@ -406,6 +406,7 @@ impl Engine {
             // the first start since the stop: the RAM speed and BIOS time read now are from right after it
             just_after: true,
             clock_shift_min: None,
+            self_crash: prev.last_ms().and_then(|t| crate::crashlog::logs_dir().and_then(|d| crate::crashlog::near(&d, t, 90_000))),
         };
         let Some(mut r) = crate::report::build_with(prev, crate::sysinfo::boot_time_ms(), events, now_ms, &ctx) else { return };
         // Hex announces unexpected restarts; a Tachyon-only stop just gets the panel banner
@@ -579,7 +580,7 @@ mod tests {
         assert_eq!(r.announced, !out.report_new);
         assert_eq!(r.samples, 116, "written every 5 s: the last few seconds are lost, as in a real crash");
         assert!(r.just_before.contains("GPU at 97%"), "{}", r.just_before);
-        if let Some(d) = &r.diagnosis {
+        if let Some(d) = r.diagnosis.as_ref().filter(|_| r.cause == crate::report::Cause::Restart) {
             // a restart with no event log here: the memory offset from before the crash is evidence
             assert!(d.causes.iter().any(|c| c.evidence.iter().any(|e| e.contains("memory clock offset +1000 MHz"))), "{d:#?}");
         }

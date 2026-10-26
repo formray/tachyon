@@ -427,6 +427,10 @@ enum Btn {
     Back,
     Export,
     Why,
+    /// "Other possible causes" / "more processes": the second level of detail
+    Others,
+    /// the marked-job report view
+    Job,
     Settings,
     Set(settings::Ctl, i8),
 }
@@ -517,6 +521,10 @@ struct App {
     view: View,
     /// the bottleneck's numbers are shown under the sentence
     show_why: bool,
+    /// the other causes (report) or the other processes (job report) are shown
+    show_others: bool,
+    /// marked-job counter and the reports read for the Job report view
+    marked_cache: Option<(u64, Vec<tachyon::markers::JobReport>)>,
     /// finished-job counter and the jobs read for the History view
     hist_cache: Option<(u64, Vec<tachyon::history::JobRecord>)>,
     export_msg: Option<String>,
@@ -697,10 +705,13 @@ pub fn run() {
             view: match std::env::var("TACHYON_VIEW").as_deref() {
                 Ok("report") => View::Report,
                 Ok("history") => View::History,
+                Ok("job") => View::Job,
                 Ok("settings") => View::Settings,
                 _ => View::Main,
             },
             show_why: false,
+            show_others: false,
+            marked_cache: None,
             hist_cache: None,
             export_msg: None,
             set: None,
@@ -1209,6 +1220,7 @@ impl App {
                 if self.s.snap.insights.data_dir.is_some() {
                     AppendMenuW(m, MF_STRING, 20, wz("Crash report").as_ptr());
                     AppendMenuW(m, MF_STRING | if self.cfg.history { 0 } else { MF_GRAYED }, 21, wz("Job history").as_ptr());
+                    AppendMenuW(m, MF_STRING, 24, wz("Last marked job report").as_ptr());
                     AppendMenuW(m, MF_STRING | if self.cfg.blackbox { 0 } else { MF_GRAYED }, 22, wz("Export flight recorder").as_ptr());
                     AppendMenuW(m, MF_SEPARATOR, 0, null());
                 }
@@ -1235,6 +1247,7 @@ impl App {
                     self.export_blackbox();
                 }
                 23 => self.open_settings(None),
+                24 => self.open_view(View::Job),
                 c if c >= 100 => self.select_gpu((c - 100) as u32),
                 _ => {}
             }
@@ -1261,6 +1274,12 @@ impl App {
                 }
             }
             Btn::Set(c, d) => self.settings_click(c, d),
+            Btn::Job => self.open_view(View::Job),
+            Btn::Others => {
+                self.show_others = !self.show_others;
+                self.fg_valid = false;
+                unsafe { self.frame(true) };
+            }
             Btn::Why => {
                 self.show_why = !self.show_why;
                 self.fg_valid = false;
@@ -1815,6 +1834,7 @@ impl App {
             let y = match self.view {
                 View::Report => self.draw_report_view(g, s, lw),
                 View::Settings => self.draw_settings_view(g, lw, &s.gpus),
+                View::Job => self.draw_job_view(g, s, lw),
                 _ => self.draw_history_view(g, s, lw),
             };
             self.panel_fixed_h = y;
@@ -1919,10 +1939,28 @@ impl App {
                 } else {
                     TEXT
                 };
-                (w.join(", "), c)
+                // never cut a word: the first reason, and how many more ("Why?" lists them all)
+                let t = if w.len() > 1 { format!("{} +{}", w[0], w.len() - 1) } else { w[0].to_string() };
+                (t, c)
             }
         };
-        let up = s.uptime as u64;
+        // the PCIe link: neutral at full speed or saving power at idle, amber when degraded
+        let (link, linkc) = match s.insights.pcie.as_ref() {
+            Some(l) => {
+                use tachyon::pcie::State;
+                let c = match l.state {
+                    Some(State::DegradedGen | State::DegradedWidth) => T_AMBER,
+                    _ => TEXT,
+                };
+                let word = match l.state {
+                    Some(State::IdleSaving) => " · idle",
+                    Some(State::DegradedGen | State::DegradedWidth) => " · slow",
+                    _ => "",
+                };
+                (format!("{}{word}", l.link), c)
+            }
+            None => ("—".to_string(), TEXT2),
+        };
         let rows: [[(&str, String, String, Rgb); 2]; 4] = [
             [
                 (
@@ -1951,7 +1989,7 @@ impl App {
                     "MB/s".into(),
                     TEXT,
                 ),
-                ("Session", format!("{:02}:{:02}:{:02}", up / 3600, up / 60 % 60, up % 60), String::new(), TEXT),
+                ("PCIe link", link, String::new(), linkc),
             ],
         ];
         for (ri, row) in rows.iter().enumerate() {
@@ -1960,12 +1998,12 @@ impl App {
                 let cx = cols[ci];
                 let lr = g.stat(|g| {
                     g.line(cx, ry + ROW_H - 0.5, cx + colw, ry + ROW_H - 0.5, (255, 255, 255), DIVIDER_A, 1.0);
-                    g.text(label, cx, ry + 21.0, Face::Sans, 12.0, TEXT2, H::L, V::Base)
+                    g.text(label, cx, ry + 21.0, Face::Sans, views::FS, TEXT2, H::L, V::Base)
                 });
-                let uw = if unit.is_empty() { 0.0 } else { g.measure(unit, Face::SansSemi, 11.0).0 + 4.0 };
-                let v = g.fit(val, Face::SansSemi, 13.5, (colw - (lr.w + 12.0) - uw).max(20.0));
                 let unit = if unit.is_empty() { String::new() } else { format!(" {unit}") };
-                g.num_unit(&v, &unit, cx + colw, ry + 21.0, Face::SansSemi, 13.5, 11.0, *c, H::Rt);
+                // values are short by construction (numbers, a link, a first reason): no ellipsis
+                let _ = lr;
+                g.num_unit(val, &unit, cx + colw, ry + 21.0, Face::SansSemi, views::FS_H, views::FS, *c, H::Rt);
             }
         }
         y += rows.len() as f32 * ROW_H + 16.0;
@@ -2041,10 +2079,11 @@ impl App {
                     if let Some(sm) = pct(p.info.sm_pct) {
                         val += &format!(" · {sm}");
                     }
-                    let vr = g.text(&val, r.r() - 12.0, r.cy() + 4.5, Face::SansSemi, 12.5, TEXT, H::Rt, V::Base);
+                    let vr = g.text(&val, r.r() - 12.0, r.cy() + 4.5, Face::SansSemi, views::FS, TEXT, H::Rt, V::Base);
                     let nx = ic.r() + 10.0;
                     let avail = vr.x - 10.0 - nx;
-                    let name = g.fit(&p.info.name, Face::SansBold, 12.5, (avail * 0.6).max(40.0));
+                    // the name is cut only when it alone is wider than the row
+                    let name = g.fit(&p.info.name, Face::SansBold, views::FS, avail.max(40.0));
                     let nr = g.text(&name, nx, r.cy() + 4.5, Face::SansBold, 12.5, TEXT, H::L, V::Base);
                     let mut meta = vec![];
                     if let Some(l) = p.chain.first() {
@@ -2061,13 +2100,21 @@ impl App {
                     if let Some(cl) = &p.cmdline {
                         meta.push(cl.clone());
                     }
-                    let meta = format!(" · {}", meta.join(" · "));
-                    let meta = g.fit(&meta, Face::Sans, 11.0, (vr.x - 10.0 - nr.r()).max(10.0));
-                    g.text(&meta, nr.r(), r.cy() + 4.5, Face::Sans, 11.0, TEXT2, H::L, V::Base);
+                    // whole words only: the details that fit, most useful first, nothing cut in half
+                    let room = (vr.x - 10.0 - nr.r()).max(0.0);
+                    let mut shown = String::new();
+                    for m in &meta {
+                        let cand = format!("{shown} · {m}");
+                        if g.measure(&cand, Face::Sans, views::FS).0 > room {
+                            break;
+                        }
+                        shown = cand;
+                    }
+                    g.text(&shown, nr.r(), r.cy() + 4.5, Face::Sans, views::FS, TEXT2, H::L, V::Base);
                     y += CHIP_STEP;
                 }
                 if vis.len() > n {
-                    g.text(&format!("+{} more", vis.len() - n), x0 + 4.0, y + 8.0, Face::Sans, 11.0, TEXT2, H::L, V::Base);
+                    g.text(&format!("+{} more", vis.len() - n), x0 + 4.0, y + 8.0, Face::Sans, views::FS, TEXT2, H::L, V::Base);
                     y += 16.0;
                 }
                 y -= CHIP_STEP - CHIP_H;

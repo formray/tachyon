@@ -12,6 +12,32 @@ use std::path::{Path, PathBuf};
 pub const JUST_BEFORE_MS: i64 = 60_000;
 /// How much of the recording the timeline shows.
 pub const TIMELINE_MS: i64 = 10 * 60_000;
+/// Events up to this long after the last record still belong to the stop (the recorder writes
+/// every 5 s, and a crash is logged a moment after it happens).
+pub const AFTER_GRACE_MS: i64 = 15_000;
+
+/// Is this event about the stop, or something that happened later? For a Tachyon-only stop,
+/// everything after the stop is later. After a restart Windows logs the restart itself, the blue
+/// screen, the clock fix and the GPU reports at the next boot, so only application crashes after
+/// the stop are set apart.
+pub fn after_the_stop(e: &SysEvent, cause: Cause, stopped_ms: i64) -> bool {
+    if e.t_ms <= stopped_ms + AFTER_GRACE_MS {
+        return false;
+    }
+    match cause {
+        Cause::AppClosed => true,
+        Cause::Restart => e.provider == crate::events::APP_ERROR,
+    }
+}
+
+/// How serious a report is, for its colour: neutral note, amber warning, red critical.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Severity {
+    Note,
+    Warning,
+    Critical,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -78,6 +104,10 @@ pub struct Report {
     pub events: Vec<EventLine>,
     /// Why there are no events, when the log could not be read.
     pub events_note: Option<String>,
+    /// Events logged after the stop that have nothing to do with it (an app crashing later in
+    /// the same boot): shown apart, never used as evidence (1.2).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub after_events: Vec<EventLine>,
     pub samples: usize,
     pub recorded_from_ms: Option<i64>,
     pub created_ms: i64,
@@ -234,14 +264,31 @@ pub fn build_with(
     let rebooted = boot_ms.is_some_and(|b| b > stopped_ms);
     let restart_event = events.iter().any(|e| e.is_restart() && e.t_ms >= stopped_ms - JUST_BEFORE_MS);
     let cause = if rebooted || restart_event { Cause::Restart } else { Cause::AppClosed };
+    // only what happened up to the stop is evidence; later events are listed apart
+    let (after, events): (Vec<SysEvent>, Vec<SysEvent>) = events.into_iter().partition(|e| after_the_stop(e, cause, stopped_ms));
+    // the same boot: the RAM speed, the BIOS start time and the clock belong to the boot, not to this stop
+    let ctx_closed;
+    let ctx = if cause == Cause::AppClosed {
+        ctx_closed = crate::diagnose::Context { self_crash: ctx.self_crash.clone(), ..Default::default() };
+        &ctx_closed
+    } else {
+        ctx
+    };
     let last: Vec<Sample> = prev.samples.iter().filter(|s| s.t_ms >= stopped_ms - JUST_BEFORE_MS).cloned().collect();
     let p_last = peaks(&last);
     let holder = vram_holder(&last).or_else(|| vram_holder(&prev.samples));
     let gpu_events: Vec<&SysEvent> =
         events.iter().filter(|e| e.is_gpu() && e.t_ms >= stopped_ms - JUST_BEFORE_MS && e.t_ms <= stopped_ms + 5_000).collect();
+    let self_crashed = ctx.self_crash.is_some()
+        || events.iter().any(|e| {
+            e.provider == crate::events::APP_ERROR
+                && e.t_ms >= stopped_ms - crate::diagnose::CLOSED_LOOKBACK_MS
+                && e.code.as_deref().is_some_and(|c| c.eq_ignore_ascii_case("tachyon.exe"))
+        });
     let headline = match cause {
         Cause::Restart => format!("Your PC restarted unexpectedly at {}.", hm(stopped_ms)),
-        Cause::AppClosed => format!("Tachyon stopped unexpectedly at {} (the PC kept running).", hm(stopped_ms)),
+        Cause::AppClosed if self_crashed => format!("Tachyon crashed at {}. Your PC kept running.", hm(stopped_ms)),
+        Cause::AppClosed => format!("Tachyon was closed at {}. Your PC kept running.", hm(stopped_ms)),
     };
     let just = just_before(&p_last, holder.as_ref(), &gpu_events);
 
@@ -287,6 +334,10 @@ pub fn build_with(
             .map(|e| EventLine { text: e.describe_with_recorder(prev.samples.last().map(|s| s.t_ms)), event: e })
             .collect(),
         events_note,
+        after_events: after
+            .into_iter()
+            .map(|e| EventLine { text: e.describe_with_recorder(prev.samples.last().map(|s| s.t_ms)), event: e })
+            .collect(),
         samples: prev.samples.len(),
         recorded_from_ms: prev.samples.first().map(|s| s.t_ms),
         created_ms: now_ms,
@@ -296,6 +347,80 @@ pub fn build_with(
 }
 
 impl Report {
+    /// Apply the 1.2 rules to a report saved by an older version: events after the stop are set
+    /// apart, and a Tachyon-only stop is diagnosed from what happened before it only (no RAM,
+    /// BIOS or PSU causes without direct evidence). Idempotent.
+    pub fn revise(&mut self) {
+        let (cause, stop) = (self.cause, self.stopped_ms);
+        let (after, keep): (Vec<EventLine>, Vec<EventLine>) =
+            std::mem::take(&mut self.events).into_iter().partition(|e| after_the_stop(&e.event, cause, stop));
+        self.events = keep;
+        let moved: Vec<(i64, String)> = after.iter().map(|e| (e.event.t_ms, e.text.clone())).collect();
+        self.timeline.retain(|l| !moved.iter().any(|(t, x)| *t == l.t_ms && *x == l.text));
+        self.after_events.extend(after);
+        self.after_events.sort_by_key(|e| e.event.t_ms);
+        self.after_events.dedup_by(|a, b| a.event.t_ms == b.event.t_ms && a.text == b.text);
+        if cause == Cause::AppClosed {
+            let ev: Vec<SysEvent> = self.events.iter().map(|e| e.event.clone()).collect();
+            let d = crate::diagnose::closed(&ev, self.events_note.is_none(), Some(stop), None);
+            let crashed = d.top().is_some_and(|c| c.suspect == crate::diagnose::Suspect::Application);
+            self.headline = if crashed {
+                format!("Tachyon crashed at {}. Your PC kept running.", hm(stop))
+            } else {
+                format!("Tachyon was closed at {}. Your PC kept running.", hm(stop))
+            };
+            // keep the crash-log evidence a newer report already had
+            if !self.diagnosis.as_ref().is_some_and(|old| {
+                old.causes.first().is_some_and(|c| c.evidence.iter().any(|e| e.starts_with("Tachyon wrote a crash log")))
+            }) {
+                self.diagnosis = Some(d);
+            }
+        }
+    }
+
+    /// How serious it is: a Tachyon-only stop with no crash is a neutral note.
+    pub fn severity(&self) -> Severity {
+        let top = self.diagnosis.as_ref().and_then(|d| d.top()).map(|c| c.suspect);
+        match self.cause {
+            Cause::AppClosed => match top {
+                None | Some(crate::diagnose::Suspect::Closed) => Severity::Note,
+                _ => Severity::Warning,
+            },
+            Cause::Restart => {
+                let bluescreen = self.events.iter().any(|e| e.event.bugcheck().is_some());
+                let whea = self.events.iter().any(|e| e.event.provider == crate::events::WHEA);
+                if bluescreen || whea { Severity::Critical } else { Severity::Warning }
+            }
+        }
+    }
+
+    /// The one-sentence verdict: what happened, is the PC OK, what to do.
+    pub fn verdict(&self) -> String {
+        let top = self.diagnosis.as_ref().and_then(|d| d.top());
+        let at = hm(self.stopped_ms);
+        match self.cause {
+            Cause::AppClosed => match top.map(|c| c.suspect) {
+                None | Some(crate::diagnose::Suspect::Closed) => {
+                    format!("Tachyon was closed at {at}, not a crash. Your PC kept running and is fine: nothing to do.")
+                }
+                Some(crate::diagnose::Suspect::Application) => {
+                    format!("Tachyon crashed at {at}. Your PC kept running and is fine; if it happens again, update Tachyon.")
+                }
+                Some(_) => format!("Tachyon stopped at {at} after a GPU or hardware error. Your PC kept running; see the top cause below."),
+            },
+            Cause::Restart => match top {
+                Some(c) => format!(
+                    "Your PC restarted unexpectedly at {at}. It is running again now; the most likely cause is {} (about {}%).",
+                    c.suspect.short(),
+                    c.percent
+                ),
+                None => {
+                    format!("Your PC restarted unexpectedly at {at}. It is running again now; there was not enough evidence for a cause.")
+                }
+            },
+        }
+    }
+
     /// What Hex says, once.
     pub fn announcement(&self) -> String {
         format!("{} {}", self.headline, self.just_before)
@@ -303,7 +428,7 @@ impl Report {
 
     /// The report as plain text (panel and export).
     pub fn to_text(&self) -> String {
-        let mut out = format!("{}\n{}\n\n", self.headline, self.just_before);
+        let mut out = format!("{}\n{}\n{}\n\n", self.headline, self.verdict(), self.just_before);
         if let Some(d) = &self.diagnosis {
             out.push_str(&format!("Probable cause ({})\n  {}\n", d.confidence, d.sentence));
             for c in &d.causes {
@@ -377,6 +502,12 @@ impl Report {
         for e in &self.events {
             out.push_str(&format!("  {}  {}\n", hms(e.event.t_ms), e.text));
         }
+        if !self.after_events.is_empty() {
+            out.push_str("\nAfter the stop (not related, not used as evidence)\n");
+            for e in &self.after_events {
+                out.push_str(&format!("  {}  {}\n", hms(e.event.t_ms), e.text));
+            }
+        }
         out
     }
 }
@@ -394,7 +525,9 @@ pub fn load(dir: &Path) -> Option<Report> {
     use std::io::Read;
     let mut buf = Vec::new();
     std::fs::File::open(dir.join(REPORT_FILE)).ok()?.take(4 << 20).read_to_end(&mut buf).ok()?;
-    serde_json::from_slice(&buf).ok()
+    let mut r: Report = serde_json::from_slice(&buf).ok()?;
+    r.revise();
+    Some(r)
 }
 
 /// Remember that Hex has told the user.
@@ -496,7 +629,7 @@ mod tests {
         let stop = T0 + 29_000;
         let r = build(&p, Some(T0 - 3_600_000), Err("Windows did not allow reading the System event log".into()), stop + 5000).unwrap();
         assert_eq!(r.cause, Cause::AppClosed);
-        assert!(r.headline.contains("the PC kept running"));
+        assert!(r.headline.contains("Your PC kept running"));
         assert!(r.to_text().contains("No Windows events: Windows did not allow reading the System event log."));
     }
 
@@ -516,6 +649,125 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&std::fs::read(json).unwrap()).unwrap();
         assert_eq!(v["report"]["cause"], "restart");
         assert_eq!(v["samples"].as_array().unwrap().len(), 120);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    fn app_ev(t_ms: i64, app: &str) -> SysEvent {
+        SysEvent { t_ms, provider: crate::events::APP_ERROR.into(), id: 1000, level: 2, code: Some(app.into()), record: 0 }
+    }
+
+    /// What the PC knew on 26 Oct 2026: RAM on EXPO, four modules, a 126 s BIOS start (all from
+    /// the boot hours earlier).
+    fn boot_ctx() -> crate::diagnose::Context {
+        crate::diagnose::Context {
+            ram: Some(crate::sysinfo::RamSpeed {
+                modules: 4,
+                part: Some("CMK32GX5M2B6000Z30".into()),
+                configured_mts: Some(5600),
+                rated_mts: Some(4800),
+                kind: "DDR5".into(),
+            }),
+            firmware_boot_ms: Some(126_000),
+            just_after: true,
+            ..Default::default()
+        }
+    }
+
+    /// 26 Oct 2026 21:38: we ended Tachyon during a --version check, no reboot. CC_Engine_x64.exe
+    /// crashed at 21:48 and 22:01, after the stop. The report blamed those crashes and added RAM
+    /// and "BIOS took 126 s" from the earlier boot. Now: closed, the PC is fine, later events apart.
+    #[test]
+    fn killed_without_reboot_is_closed_and_ignores_later_events_and_the_boot() {
+        let p = prev(false, 120);
+        let stop = T0 + 119_000;
+        let events = vec![app_ev(stop + 10 * 60_000, "CC_Engine_x64.exe"), app_ev(stop + 23 * 60_000, "CC_Engine_x64.exe")];
+        let r = build_with(&p, Some(T0 - 5 * 3_600_000), Ok(events), stop + 30 * 60_000, &boot_ctx()).unwrap();
+        assert_eq!(r.cause, Cause::AppClosed);
+        assert_eq!(r.headline, format!("Tachyon was closed at {}. Your PC kept running.", hm(stop)));
+        assert!(r.events.is_empty(), "{:?}", r.events);
+        assert_eq!(r.after_events.len(), 2);
+        assert!(r.timeline.iter().all(|l| !l.text.contains("CC_Engine")), "{:#?}", r.timeline);
+        let d = r.diagnosis.as_ref().unwrap();
+        assert_eq!(d.causes.len(), 1, "{d:#?}");
+        assert_eq!(d.causes[0].suspect, crate::diagnose::Suspect::Closed);
+        assert!(d.hints.is_empty(), "no BIOS hint for a stop in the same boot: {:?}", d.hints);
+        let text = r.to_text();
+        for bad in ["EXPO", "BIOS", "RAM runs", "A bug in the application"] {
+            assert!(!text.split("After the stop").next().unwrap().contains(bad), "{bad} in:\n{text}");
+        }
+        assert!(text.contains("After the stop (not related, not used as evidence)"));
+        assert_eq!(r.severity(), Severity::Note);
+        assert!(r.verdict().contains("not a crash") && r.verdict().contains("nothing to do"), "{}", r.verdict());
+    }
+
+    #[test]
+    fn tachyon_crash_without_reboot_is_its_own_crash() {
+        let p = prev(false, 120);
+        let stop = T0 + 119_000;
+        let r = build_with(&p, Some(T0 - 3_600_000), Ok(vec![app_ev(stop + 4000, "tachyon.exe")]), stop + 60_000, &boot_ctx()).unwrap();
+        assert_eq!(r.cause, Cause::AppClosed);
+        assert!(r.headline.starts_with("Tachyon crashed at "), "{}", r.headline);
+        let d = r.diagnosis.as_ref().unwrap();
+        assert_eq!(d.causes[0].suspect, crate::diagnose::Suspect::Application);
+        assert_eq!(d.causes[0].label, "Tachyon itself crashed");
+        assert!(d.causes.iter().all(|c| c.suspect != crate::diagnose::Suspect::Ram));
+        assert_eq!(r.severity(), Severity::Warning);
+        // the crash log alone is enough too
+        let ctx = crate::diagnose::Context { self_crash: Some("crash log at 21:38:02: test".into()), ..boot_ctx() };
+        let r2 = build_with(&p, Some(T0 - 3_600_000), Ok(vec![]), stop + 60_000, &ctx).unwrap();
+        assert!(r2.headline.starts_with("Tachyon crashed at "));
+        assert!(r2.diagnosis.unwrap().causes[0].evidence[0].contains("crash log at 21:38:02"));
+    }
+
+    #[test]
+    fn driver_reset_just_before_a_tachyon_stop_is_the_cause() {
+        let p = prev(false, 120);
+        let stop = T0 + 119_000;
+        let r = build_with(&p, Some(T0 - 3_600_000), Ok(vec![ev(stop - 10_000, "nvlddmkm", 153)]), stop + 60_000, &boot_ctx()).unwrap();
+        let d = r.diagnosis.unwrap();
+        assert_eq!(d.causes[0].suspect, crate::diagnose::Suspect::DriverTimeout, "{d:#?}");
+        assert!(d.causes.iter().all(|c| c.suspect != crate::diagnose::Suspect::Ram));
+    }
+
+    #[test]
+    fn restart_keeps_its_boot_events_but_sets_later_app_crashes_apart() {
+        let p = prev(false, 600);
+        let stop = T0 + 599_000;
+        let events = vec![
+            ev(stop + 70_000, "Microsoft-Windows-Kernel-Power", 41),
+            app_ev(stop - 2000, "python.exe"),
+            app_ev(stop + 40 * 60_000, "CC_Engine_x64.exe"),
+        ];
+        let r = build(&p, Some(stop + 40_000), Ok(events), stop + 60 * 60_000).unwrap();
+        assert_eq!(r.cause, Cause::Restart);
+        assert_eq!(r.events.len(), 2);
+        assert_eq!(r.after_events.len(), 1);
+        assert!(r.after_events[0].text.contains("CC_Engine"));
+        let d = r.diagnosis.unwrap();
+        assert!(d.causes.iter().flat_map(|c| c.evidence.iter()).all(|e| !e.contains("CC_Engine")), "{d:#?}");
+    }
+
+    /// The report Giuseppe's PC saved for 21:38 with 1.2 before this fix, revised on load.
+    #[test]
+    fn old_report_of_the_2138_stop_is_revised_on_load() {
+        let old = include_str!("../tests/samples/report_2138_v12draft.json");
+        let dir = std::env::temp_dir().join(format!("tachyon_report_rev_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(REPORT_FILE), old).unwrap();
+        let r = load(&dir).unwrap();
+        assert_eq!(r.cause, Cause::AppClosed);
+        assert!(r.headline.starts_with("Tachyon was closed at "), "{}", r.headline);
+        assert!(r.events.is_empty());
+        assert_eq!(r.after_events.len(), 2);
+        assert!(r.timeline.iter().all(|l| !l.text.contains("CC_Engine")));
+        let d = r.diagnosis.as_ref().unwrap();
+        assert_eq!(d.causes.len(), 1);
+        assert_eq!(d.causes[0].suspect, crate::diagnose::Suspect::Closed);
+        assert!(d.hints.is_empty());
+        assert_eq!(r.severity(), Severity::Note);
+        let mut again = r.clone();
+        again.revise();
+        assert_eq!(again, r, "revise is idempotent");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -1,0 +1,116 @@
+{
+  "cause": "app_closed",
+  "stopped_ms": 1793047122227,
+  "boot_ms": 1793039627194,
+  "headline": "Tachyon stopped unexpectedly at 21:38 (the PC kept running).",
+  "just_before": "Just before: GPU at 9%, 37 °C, VRAM 1.4 of 15.9 GB.",
+  "peaks_last_minute": {
+    "gpu_util": 9,
+    "temp": 37,
+    "power_w": 52.6,
+    "power_limit_w": 360.0,
+    "vram_mb": 1409.0,
+    "vram_total_mb": 16303.0,
+    "cpu": 5.0,
+    "cpu_core_max": 30.0,
+    "ram_used_mb": 16439.0,
+    "ram_total_mb": 65172.0,
+    "commit_mb": 18962.0,
+    "commit_limit_mb": 69268.0,
+    "power_throttled_s": 0,
+    "thermal_throttled_s": 0
+  },
+  "peaks": {
+    "gpu_util": 9,
+    "temp": 37,
+    "power_w": 52.6,
+    "power_limit_w": 360.0,
+    "vram_mb": 1409.0,
+    "vram_total_mb": 16303.0,
+    "cpu": 5.0,
+    "cpu_core_max": 30.0,
+    "ram_used_mb": 16439.0,
+    "ram_total_mb": 65172.0,
+    "commit_mb": 18962.0,
+    "commit_limit_mb": 69268.0,
+    "power_throttled_s": 0,
+    "thermal_throttled_s": 0
+  },
+  "vram_holder": null,
+  "timeline": [
+    {
+      "t_ms": 1793047117120,
+      "text": "GPU 2% · 37 °C · 39 W · VRAM 1.4 GB · CPU 3% · RAM 16.1 GB"
+    },
+    {
+      "t_ms": 1793047122227,
+      "text": "Last record: GPU 1% · 37 °C · 40 W · VRAM 1.2 GB · CPU 2% · RAM 16.0 GB"
+    },
+    {
+      "t_ms": 1793047685358,
+      "text": "CC_Engine_x64.exe crashed (Application Error 1000)."
+    },
+    {
+      "t_ms": 1793048461687,
+      "text": "CC_Engine_x64.exe crashed (Application Error 1000)."
+    }
+  ],
+  "events": [
+    {
+      "t_ms": 1793047685358,
+      "provider": "Application Error",
+      "id": 1000,
+      "level": 2,
+      "code": "CC_Engine_x64.exe",
+      "record": 188546,
+      "text": "CC_Engine_x64.exe crashed (Application Error 1000)."
+    },
+    {
+      "t_ms": 1793048461687,
+      "provider": "Application Error",
+      "id": 1000,
+      "level": 2,
+      "code": "CC_Engine_x64.exe",
+      "record": 188609,
+      "text": "CC_Engine_x64.exe crashed (Application Error 1000)."
+    }
+  ],
+  "events_note": null,
+  "samples": 6,
+  "recorded_from_ms": 1793047117120,
+  "created_ms": 1793052212891,
+  "announced": true,
+  "diagnosis": {
+    "causes": [
+      {
+        "suspect": "application",
+        "label": "A bug in the application",
+        "percent": 45,
+        "evidence": [
+          "CC_Engine_x64.exe crashed (Application Error 1000)"
+        ],
+        "advice": "The crash came from CC_Engine_x64.exe: update it and its GPU libraries (CUDA, PyTorch and so on) and check its log."
+      },
+      {
+        "suspect": "ram",
+        "label": "Unstable RAM or memory overclock (EXPO/XMP)",
+        "percent": 30,
+        "evidence": [
+          "the RAM runs an EXPO/XMP profile: 5600 MT/s now (kit rated 6000, standard 4800)",
+          "4 DDR5 modules at 5600 MT/s, from 2 separate kits: with two modules per channel most CPUs are only specified for about 3600-5200 MT/s"
+        ],
+        "advice": "The RAM runs at 5600 MT/s now; the settings may have changed since this crash. If you already lowered it and it has been stable since, no action is needed. Otherwise run a memory test (TestMem5, OCCT or MemTest86), and only if it finds errors try one step slower (5600 → 5200 MT/s) or EXPO/XMP off. Four modules are harder to run fast than two."
+      }
+    ],
+    "confidence": "likely",
+    "sentence": "Likely cause: a bug in the application, about 45%.",
+    "normal": [
+      "GPU temperature was normal (at most 37 °C).",
+      "GPU power was moderate (53 of 360 W)."
+    ],
+    "note": "Tachyon only reads: it changes no settings. These are estimates from the evidence listed, not certainties.",
+    "hints": [
+      "Worth knowing: the BIOS took 126 s to start (memory training after a reset takes longer)."
+    ]
+  }
+}

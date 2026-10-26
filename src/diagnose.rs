@@ -25,10 +25,21 @@ pub enum Suspect {
     /// The whole PC lost power or was switched off: the wall, the PSU switch, a manual power-off
     /// or a reset from the motherboard, not something the GPU did.
     PowerCut,
+    /// Only Tachyon stopped and nothing was logged: it was closed (by the user, an update or
+    /// another program ending it), not a crash and not the PC.
+    Closed,
 }
 
-const ALL: [Suspect; 7] =
-    [Suspect::Ram, Suspect::GpuOverclock, Suspect::Power, Suspect::Heat, Suspect::DriverTimeout, Suspect::Application, Suspect::PowerCut];
+const ALL: [Suspect; 8] = [
+    Suspect::Ram,
+    Suspect::GpuOverclock,
+    Suspect::Power,
+    Suspect::Heat,
+    Suspect::DriverTimeout,
+    Suspect::Application,
+    Suspect::PowerCut,
+    Suspect::Closed,
+];
 
 impl Suspect {
     pub fn label(self) -> &'static str {
@@ -40,6 +51,26 @@ impl Suspect {
             Suspect::DriverTimeout => "GPU driver timeout (TDR) from a long GPU task",
             Suspect::Application => "A bug in the application",
             Suspect::PowerCut => "A whole-system power loss or a manual power-off",
+            Suspect::Closed => "Tachyon was closed, not a crash",
+        }
+    }
+    /// The same in plain words, for people who do not know the jargon (shown under the label).
+    pub fn plain(self) -> &'static str {
+        match self {
+            Suspect::Ram => {
+                "EXPO/XMP is a BIOS setting that runs the RAM faster than standard; if it is not fully stable, the PC can freeze or restart."
+            }
+            Suspect::GpuOverclock => "The graphics card runs faster than its factory settings (e.g. set in MSI Afterburner).",
+            Suspect::Power => "The power supply or the GPU's power cables could not keep up with the load.",
+            Suspect::Heat => "The graphics card got too hot.",
+            Suspect::DriverTimeout => "A GPU task took longer than Windows allows, so Windows reset the graphics driver.",
+            Suspect::Application => "A program crashed on its own; the hardware is probably fine.",
+            Suspect::PowerCut => {
+                "The whole PC lost power at once: the wall socket, the power strip, the PSU switch or someone pressing the power button."
+            }
+            Suspect::Closed => {
+                "It was ended by you, by an installer or update, or by another program; Windows logged no crash and the PC kept running."
+            }
         }
     }
     /// Short label for the panel and Hex.
@@ -52,6 +83,7 @@ impl Suspect {
             Suspect::DriverTimeout => "driver timeout (TDR)",
             Suspect::Application => "application bug",
             Suspect::PowerCut => "power cut / switched off",
+            Suspect::Closed => "Tachyon was closed",
         }
     }
     fn idx(self) -> usize {
@@ -74,6 +106,8 @@ pub struct Context {
     /// The restart diagnosed is the current boot, so the RAM speed and BIOS time read now are
     /// the ones right after it.
     pub just_after: bool,
+    /// Tachyon's own crash log written around the stop ("crash log at 21:38:02: <what>").
+    pub self_crash: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -125,8 +159,8 @@ const TOP_CAP: u8 = 85;
 
 #[derive(Default)]
 struct Board {
-    s: [f32; 7],
-    ev: [Vec<String>; 7],
+    s: [f32; 8],
+    ev: [Vec<String>; 8],
 }
 
 impl Board {
@@ -214,6 +248,10 @@ pub fn diagnose(
     holder: Option<&Holder>,
     ctx: &Context,
 ) -> Option<Diagnosis> {
+    if cause == Cause::AppClosed {
+        let stop = last_minute.last().map(|s| s.t_ms);
+        return Some(closed(events, events_readable, stop, ctx.self_crash.as_deref()));
+    }
     let mut b = Board::default();
     let mut normal: Vec<String> = vec![];
     let count = |f: &dyn Fn(&SysEvent) -> bool| events.iter().filter(|e| f(e)).count();
@@ -611,6 +649,93 @@ pub fn diagnose(
     })
 }
 
+/// How far before the stop an event still counts as "just before" for a Tachyon-only stop.
+pub const CLOSED_LOOKBACK_MS: i64 = 2 * 60_000;
+/// Hardware errors are direct evidence a bit longer before.
+const CLOSED_WHEA_LOOKBACK_MS: i64 = 10 * 60_000;
+
+/// Tachyon stopped but the PC kept running (same boot). Only evidence from before the stop
+/// counts, and hardware causes (RAM, PSU, BIOS) only with direct evidence (WHEA errors): the RAM
+/// speed, the BIOS start time and the clock belong to the boot, not to this stop. Without any
+/// evidence it was closed, which is not a problem. `events` must already end at the stop.
+pub fn closed(events: &[SysEvent], events_readable: bool, stop_ms: Option<i64>, self_crash: Option<&str>) -> Diagnosis {
+    let stop = stop_ms.unwrap_or_else(|| events.iter().map(|e| e.t_ms).max().unwrap_or(0));
+    let near = |e: &&SysEvent, back: i64| stop_ms.is_none() || (e.t_ms >= stop - back && e.t_ms <= stop + 10_000);
+    let mut b = Board::default();
+    let tachyon_err: Vec<&SysEvent> = events
+        .iter()
+        .filter(|e| near(e, CLOSED_LOOKBACK_MS))
+        .filter(|e| e.provider == APP_ERROR && e.code.as_deref().is_some_and(|c| c.eq_ignore_ascii_case("tachyon.exe")))
+        .collect();
+    if let Some(c) = self_crash {
+        b.add(Suspect::Application, 4.0, &format!("Tachyon wrote a crash log ({c})"));
+    }
+    if !tachyon_err.is_empty() {
+        b.add(Suspect::Application, 4.0, "Windows logged that tachyon.exe crashed (Application Error 1000)");
+    }
+    let gpu: Vec<&SysEvent> = events.iter().filter(|e| near(e, CLOSED_LOOKBACK_MS) && e.is_gpu()).collect();
+    if !gpu.is_empty() {
+        let why = format!("{} just before Tachyon stopped", plural(gpu.len(), "GPU driver error"));
+        b.add(Suspect::DriverTimeout, 2.5, &why);
+        b.add(Suspect::GpuOverclock, 1.0, &why);
+    }
+    let whea: Vec<&SysEvent> = events.iter().filter(|e| near(e, CLOSED_WHEA_LOOKBACK_MS) && e.provider == WHEA).collect();
+    if !whea.is_empty() {
+        let why = format!("{} logged in the 10 minutes before (WHEA-Logger)", plural(whea.len(), "hardware error"));
+        let mem = whea.iter().any(|e| matches!(e.id, 47 | 19 | 18));
+        b.add(if mem { Suspect::Ram } else { Suspect::Power }, 2.0, &why);
+    }
+    let crashed = b.s[Suspect::Application.idx()] > 0.0;
+    let anything = b.s.iter().any(|v| *v > 0.0);
+    if !anything {
+        let mut ev = vec!["the PC did not restart: Windows kept running after Tachyon stopped".to_string()];
+        if events_readable {
+            ev.push("Windows logged no crash of Tachyon and no GPU or hardware error before it stopped".into());
+        }
+        b.add(Suspect::Closed, 3.0, "");
+        b.ev[Suspect::Closed.idx()] = ev;
+    }
+    let total: f32 = b.s.iter().sum();
+    let denom = total + if anything { RESERVE } else { 0.5 };
+    let mut ranked: Vec<(Suspect, f32)> = ALL.iter().map(|s| (*s, b.get(*s))).filter(|(_, v)| *v > 0.0).collect();
+    ranked.sort_by(|a, c| c.1.total_cmp(&a.1));
+    let causes: Vec<Ranked> = ranked
+        .into_iter()
+        .map(|(s, v)| (s, ((v / denom * 100.0 / 5.0).round() * 5.0).clamp(0.0, TOP_CAP as f32) as u8))
+        .filter(|(_, p)| *p >= 10)
+        .map(|(s, pct)| Ranked {
+            suspect: s,
+            label: if s == Suspect::Application && crashed { "Tachyon itself crashed".into() } else { s.label().into() },
+            percent: pct,
+            evidence: b.ev[s.idx()].clone(),
+            advice: match s {
+                Suspect::Application => {
+                    "Nothing else to do now; if it happens again, update Tachyon and send the crash log from the logs folder.".into()
+                }
+                Suspect::DriverTimeout => {
+                    "If it happens again, update the NVIDIA driver; if a long GPU task was running, use smaller batches or tiles.".into()
+                }
+                Suspect::Ram => "Run a memory test (TestMem5, OCCT or MemTest86) when you have time.".into(),
+                Suspect::Power => "Check that the GPU power cables are fully seated.".into(),
+                _ => advice(s, &Context::default(), &Peaks::default(), &[]),
+            },
+        })
+        .collect();
+    let normal = vec!["The PC kept running: this was not a restart, a power loss or a blue screen.".to_string()];
+    let note = "Tachyon only reads: it changes no settings. These are estimates from the evidence listed, not certainties.".to_string();
+    let (confidence, sentence) = match causes.first() {
+        Some(c) if c.suspect == Suspect::Closed => {
+            ("likely".to_string(), "Tachyon was most likely closed (by you, an update or another program); it did not crash.".to_string())
+        }
+        Some(c) => {
+            let w = if c.percent >= 40 { "Likely" } else { "Possible" };
+            (w.to_ascii_lowercase(), format!("{w} cause: {}, about {}%.", lower_first(&c.label), c.percent))
+        }
+        None => ("unclear".into(), "Not enough evidence for a probable cause.".into()),
+    };
+    Diagnosis { causes, confidence, sentence, normal, note, hints: vec![] }
+}
+
 fn lower_first(s: &str) -> String {
     // keep acronyms (GPU, RAM) as they are
     let mut c = s.chars();
@@ -655,6 +780,7 @@ fn advice(s: Suspect, ctx: &Context, peaks: &Peaks, crashed: &[String]) -> Strin
         ),
         Suspect::DriverTimeout => "One GPU task ran longer than Windows allows (2 s). Smaller batches or tiles usually fix it; if it happens in many apps, reinstall the driver cleanly.".into(),
         Suspect::PowerCut => "If nobody switched it off: check the wall socket, the power strip and the PSU's switch and cable, and what changed at that moment (something plugged in or unplugged, e.g. a USB stick in the rear BIOS FlashBack port, or the power or reset button). If it happens again at idle with nothing touched, have the PSU tested.".into(),
+        Suspect::Closed => "Nothing to do: your PC kept running and no crash was logged.".into(),
         Suspect::Application => match crashed.first() {
             Some(a) => format!("The crash came from {a}: update it and its GPU libraries (CUDA, PyTorch and so on) and check its log."),
             None => "Update the application and its GPU libraries and check its log.".into(),
@@ -808,6 +934,7 @@ mod tests {
             clock_shift_min: Some(60),
             firmware_boot_ms: Some(52_000),
             just_after: true,
+            self_crash: None,
         };
         let lm = idle_minute();
         let p = crate::report::peaks(&lm);
@@ -865,15 +992,19 @@ mod tests {
     fn tdr_from_a_long_kernel_on_a_stock_card() {
         let events = vec![ev(-10, "Display", 4101, None), ev(-9, "nvlddmkm", 153, None), ev(-8, LIVE_KERNEL, 0x141, None)];
         let ctx = Context { oc: Some(stock()), ram: Some(ram(5600, 5600)), ..Default::default() };
-        let d = diagnose(Cause::AppClosed, &events, true, &peaks(100, 70, 300.0), &[], None, &ctx).unwrap();
+        let d = diagnose(Cause::Restart, &events, true, &peaks(100, 70, 300.0), &[], None, &ctx).unwrap();
         assert_eq!(d.causes[0].suspect, Suspect::DriverTimeout, "{d:#?}");
         assert!(d.causes[0].evidence.iter().any(|e| e.contains("2-second timeout")));
+        // the same driver errors just before a Tachyon-only stop: the driver, never the RAM
+        let d = diagnose(Cause::AppClosed, &events, true, &peaks(100, 70, 300.0), &[], None, &ctx).unwrap();
+        assert_eq!(d.causes[0].suspect, Suspect::DriverTimeout, "{d:#?}");
+        assert!(d.causes.iter().all(|c| c.suspect != Suspect::Ram));
     }
 
     #[test]
     fn application_crash_of_the_main_gpu_process() {
         let events = vec![ev(-5, APP_ERROR, 1000, Some("python.exe")), ev(-4, APP_ERROR, 1000, Some("tachyon.exe"))];
-        let d = diagnose(Cause::AppClosed, &events, true, &peaks(90, 70, 250.0), &[], Some(&python()), &Context::default()).unwrap();
+        let d = diagnose(Cause::Restart, &events, true, &peaks(90, 70, 250.0), &[], Some(&python()), &Context::default()).unwrap();
         assert_eq!(d.causes[0].suspect, Suspect::Application);
         assert!(d.causes[0].advice.starts_with("The crash came from python.exe"));
         assert!(!d.causes[0].evidence.iter().any(|e| e.contains("tachyon.exe")));
@@ -881,11 +1012,14 @@ mod tests {
 
     #[test]
     fn thin_or_no_evidence_is_said_so() {
-        // Tachyon was simply closed: nothing to diagnose
-        assert!(diagnose(Cause::AppClosed, &[], true, &peaks(10, 50, 60.0), &[], None, &Context::default()).is_none());
+        // Tachyon was simply closed: said so, nothing to do
+        let d = diagnose(Cause::AppClosed, &[], true, &peaks(10, 50, 60.0), &[], None, &Context::default()).unwrap();
+        assert_eq!(d.causes.len(), 1);
+        assert_eq!(d.causes[0].suspect, Suspect::Closed);
+        assert!(d.causes[0].advice.starts_with("Nothing to do"));
         // an unknown event alone is not enough
-        let d = diagnose(Cause::AppClosed, &[ev(0, "nvlddmkm", 999, None)], true, &peaks(10, 50, 60.0), &[], None, &Context::default())
-            .unwrap();
+        let d =
+            diagnose(Cause::Restart, &[ev(0, "nvlddmkm", 999, None)], true, &peaks(10, 50, 60.0), &[], None, &Context::default()).unwrap();
         assert!(d.causes.is_empty() && d.confidence == "unclear", "{d:#?}");
         // a restart with an unreadable log keeps more in reserve: no "likely"
         let d = diagnose(Cause::Restart, &[], false, &peaks(50, 60, 150.0), &[], None, &Context::default()).unwrap();

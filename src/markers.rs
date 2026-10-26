@@ -162,6 +162,71 @@ pub struct JobReport {
     pub sentence: String,
 }
 
+/// How a job report reads at a glance: neutral, or amber when something needs a look.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tone {
+    Note,
+    Warning,
+}
+
+impl JobReport {
+    /// One plain sentence: how busy the GPU was, and whether anything held it back that the
+    /// user should act on (heat, a slow PCIe link, VRAM nearly full). Power-cap time under heavy
+    /// load is normal and said so.
+    pub fn verdict(&self) -> (String, Tone) {
+        let mut tone = Tone::Note;
+        let busy = match self.gpu_util_avg {
+            Some(u) if u >= 90.0 => format!("the GPU almost fully busy ({u:.0}% on average)"),
+            Some(u) if u >= 60.0 => format!("the GPU busy ({u:.0}% on average)"),
+            Some(u) => format!("the GPU lightly used ({u:.0}% on average)"),
+            None => "no GPU readings".to_string(),
+        };
+        let mut parts = vec![format!("Ran {} with {busy}", crate::history::fmt_duration(self.duration_s))];
+        if self.thermal_limited_s >= 10.0 {
+            tone = Tone::Warning;
+            parts.push(format!("it slowed down from heat for {:.0} s: check the cooling", self.thermal_limited_s));
+        }
+        let full = self.vram_peak_mb.zip(self.vram_total_mb).is_some_and(|(p, t)| t > 0.0 && p / t >= 0.95);
+        if full {
+            tone = Tone::Warning;
+            parts.push("VRAM was nearly full: a bigger job may not fit".into());
+        }
+        let degraded = self.pcie["degraded_events"].as_u64().unwrap_or(0) > 0;
+        if degraded {
+            tone = Tone::Warning;
+            parts.push("the PCIe link was slower than the slot allows".into());
+        }
+        let mut s = parts.join("; ");
+        s.push('.');
+        if tone == Tone::Note {
+            if self.power_limited_s >= 10.0 {
+                s.push_str(&format!(
+                    " The power cap held the clocks for {:.0} s, which is normal under heavy load. Nothing to fix.",
+                    self.power_limited_s
+                ));
+            } else {
+                s.push_str(" Nothing held it back. Nothing to fix.");
+            }
+        }
+        (s, tone)
+    }
+
+    /// The PCIe link during the job in plain words.
+    pub fn pcie_sentence(&self) -> String {
+        let p = &self.pcie;
+        let s = |k: &str| p[k].as_str().map(str::to_string);
+        match (s("lowest_seen"), s("best_possible")) {
+            (Some(low), Some(best)) if low == best && p["degraded_events"].as_u64().unwrap_or(0) == 0 => {
+                format!("{best} for the whole job, the best this slot allows.")
+            }
+            (Some(low), Some(best)) => {
+                format!("Between {low} and {best} (best possible); {} slowdowns under load.", p["degraded_events"].as_u64().unwrap_or(0))
+            }
+            _ => "Not reported by this GPU or driver.".into(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 struct Acc {
     name: String,
@@ -660,5 +725,28 @@ mod tests {
         let tr2 = MarkerTracker::open(&d, t0 + 70_000);
         assert_eq!(tr2.open_jobs(t0 + 70_000)[0].job, "overnight");
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Giuseppe's two demo jobs on the RTX 5080 (26 Oct 2026): plain verdicts, no false alarms.
+    #[test]
+    fn verdicts_of_the_real_demo_jobs() {
+        let reps: Vec<JobReport> =
+            include_str!("../tests/samples/marked_jobs_2026-10-26.jsonl").lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+        let heavy = reps.iter().find(|r| r.job == "demo 1.2 heavy").expect("heavy job");
+        let (v, tone) = heavy.verdict();
+        assert_eq!(tone, Tone::Note, "{v}");
+        assert!(v.starts_with("Ran 5 min") && v.contains("almost fully busy (99% on average)"), "{v}");
+        assert!(v.contains("The power cap held the clocks for 169 s, which is normal"), "{v}");
+        assert_eq!(heavy.pcie_sentence(), "Gen5 x16 for the whole job, the best this slot allows.");
+        let light = reps.iter().find(|r| r.job == "demo 1.2").expect("light job");
+        let (v, tone) = light.verdict();
+        assert_eq!(tone, Tone::Note);
+        assert!(v.contains("Nothing held it back"), "{v}");
+        // heat makes it a warning, and the sentence says what to do
+        let mut hot = heavy.clone();
+        hot.thermal_limited_s = 42.0;
+        let (v, tone) = hot.verdict();
+        assert_eq!(tone, Tone::Warning);
+        assert!(v.contains("slowed down from heat for 42 s: check the cooling") && !v.contains("Nothing to fix"), "{v}");
     }
 }

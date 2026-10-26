@@ -39,6 +39,28 @@ pub fn take_last(dir: &Path) -> Option<PathBuf> {
     p.exists().then_some(p)
 }
 
+/// A crash log written within `within_ms` of `t_ms` (by its file name), as "crash log at
+/// 21:38:02: <what>", for the report on a Tachyon-only stop.
+pub fn near(dir: &Path, t_ms: i64, within_ms: i64) -> Option<String> {
+    use chrono::TimeZone;
+    let mut best: Option<(i64, String)> = None;
+    for e in std::fs::read_dir(dir).ok()?.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let Some(stamp) = name.strip_prefix("panic-").and_then(|n| n.strip_suffix(".txt")) else { continue };
+        let Ok(nd) = chrono::NaiveDateTime::parse_from_str(stamp, "%Y%m%d-%H%M%S") else { continue };
+        let Some(t) = chrono::Local.from_local_datetime(&nd).earliest().map(|d| d.timestamp_millis()) else { continue };
+        let d = (t - t_ms).abs();
+        if d <= within_ms && best.as_ref().is_none_or(|(b, _)| d < *b) {
+            let what = std::fs::read_to_string(e.path())
+                .ok()
+                .and_then(|s| s.lines().find_map(|l| l.strip_prefix("what: ").map(|w| w.chars().take(120).collect::<String>())))
+                .unwrap_or_else(|| "no details".into());
+            best = Some((d, format!("crash log at {}: {what}", nd.format("%H:%M:%S"))));
+        }
+    }
+    best.map(|(_, s)| s)
+}
+
 /// Install the hook. `on_crash` runs after the log is written (the GUI shows a message box).
 pub fn install(mode: &'static str, on_crash: fn(Option<&Path>)) {
     std::panic::set_hook(Box::new(move |info| {
