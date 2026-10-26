@@ -56,7 +56,10 @@ forecast() {
 
 history() {
   echo "== history view: a real GPU session recorded under wine (busy 2 min, clean close), then the view"
-  stop; echo busy > $SC; cfg panel ""; run 300; sleep 130; stop; rm -f $SC
+  stop; rm -rf $LA/history /tmp/tachyon-work/seed; mkdir -p $LA
+  TACHYON_DEMO_DIR=/tmp/tachyon-work/seed cargo test --release --test demo_data -q -- --ignored >/dev/null 2>&1
+  cp -r /tmp/tachyon-work/seed/history $LA/
+  echo busy > $SC; cfg panel ""; run 300; sleep 130; stop; rm -f $SC
   tail -1 $LA/history/jobs.jsonl | cut -c1-200
   cfg panel ""; run 60 TACHYON_VIEW=history; sleep 14; import -window root $OUT/history_root.png; sleep 8; stop; }
 

@@ -365,6 +365,9 @@ pub fn fmt_duration(s: f64) -> String {
 
 /// "14% slower than last time; GPU spent 6 min power-throttled."
 pub fn compare(prev: &JobRecord, cur: &JobRecord) -> String {
+    if cur.kind == JobKind::Gpu && cur.avg_fps.is_none() {
+        return compare_session(prev, cur);
+    }
     // Speed: frames per second when both have it, otherwise duration.
     let change = match (prev.avg_fps, cur.avg_fps) {
         (Some(p), Some(c)) if p > 0.0 && c > 0.0 => (p / c - 1.0) * 100.0,
@@ -387,6 +390,28 @@ pub fn compare(prev: &JobRecord, cur: &JobRecord) -> String {
         && ((c / p - 1.0) * 100.0).abs() >= 10.0
     {
         parts.push(format!("energy {:+.0}%", (c / p - 1.0) * 100.0));
+    }
+    format!("{}.", parts.join("; "))
+}
+
+/// A GPU-busy session has no fixed amount of work, so its length says nothing about speed:
+/// compare how long it ran, the load and the average power instead.
+fn compare_session(prev: &JobRecord, cur: &JobRecord) -> String {
+    let mut parts = vec![format!("Ran {} ({} last time)", fmt_duration(cur.duration_s), fmt_duration(prev.duration_s))];
+    if let (Some(p), Some(c)) = (prev.avg_gpu, cur.avg_gpu)
+        && (c - p).abs() >= 5.0
+    {
+        parts.push(format!("average GPU {c:.0}% (was {p:.0}%)"));
+    }
+    if cur.thermal_throttled_s >= 60.0 {
+        parts.push(format!("GPU spent {} slowed by heat", fmt_duration(cur.thermal_throttled_s)));
+    }
+    let watts = |r: &JobRecord| r.energy_wh.filter(|_| r.duration_s >= 1.0).map(|e| e * 3600.0 / r.duration_s);
+    if let (Some(p), Some(c)) = (watts(prev), watts(cur))
+        && p > 0.0
+        && ((c / p - 1.0) * 100.0).abs() >= 10.0
+    {
+        parts.push(format!("average power {:+.0}%", (c / p - 1.0) * 100.0));
     }
     format!("{}.", parts.join("; "))
 }
@@ -577,6 +602,12 @@ mod tests {
         let fps_a = JobRecord { avg_fps: Some(30.0), ..base.clone() };
         let fps_b = JobRecord { avg_fps: Some(25.0), duration_s: 500.0, thermal_throttled_s: 120.0, ..base.clone() };
         assert_eq!(compare(&fps_a, &fps_b), "20% slower than last time; GPU spent 2 min slowed by heat.");
+        // GPU-busy sessions: no "slower", just length, load and average power
+        let s1 = JobRecord { kind: JobKind::Gpu, duration_s: 60.0, avg_gpu: Some(79.0), energy_wh: Some(5.0), ..base.clone() };
+        let s2 = JobRecord { kind: JobKind::Gpu, duration_s: 120.0, avg_gpu: Some(95.0), energy_wh: Some(11.0), ..base.clone() };
+        assert_eq!(compare(&s1, &s2), "Ran 2 min (1 min last time); average GPU 95% (was 79%); average power +10%.");
+        let s3 = JobRecord { energy_wh: Some(10.0), avg_gpu: Some(81.0), ..s2.clone() };
+        assert_eq!(compare(&s2, &s3), "Ran 2 min (2 min last time); average GPU 81% (was 95%).");
     }
 
     #[test]
