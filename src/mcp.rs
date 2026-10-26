@@ -83,7 +83,7 @@ pub fn tools() -> Value {
     ])
 }
 
-const OFF: &str = "The agent API is off. Set agent_api = true in tachyon.toml (next to tachyon.exe) and restart Tachyon.";
+const OFF: &str = "The agent API is off. Turn on Agent API in Tachyon's Settings (right-click menu, AI agents), or set agent_api = true in tachyon.toml next to tachyon.exe.";
 
 fn minute_lines(w: &[crate::telemetry::Sample]) -> Vec<Value> {
     let mut out = vec![];

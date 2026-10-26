@@ -51,5 +51,8 @@ clicks() {
   click ${AGENT_X:-436} ${AGENT_Y:-297}   # Agent API toggle
   sleep 2; snap clicks_ai_after
   ls -l $R/; echo "--- tachyon.toml after"; cat $R/tachyon.toml; echo "--- diff vs before"; diff $OUT/before.toml $R/tachyon.toml
-  sleep 2; stop; }
+  echo "--- MCP while the toggle is on (expect the live source, tachyon)"; python3 tests/mcp_client.py $R tachyon; echo "mcp exit $?"
+  click ${AGENT_X:-436} ${AGENT_Y:-297}; sleep 2   # off again, live
+  echo "--- MCP after switching it off (expect off)"; python3 tests/mcp_client.py $R off; echo "mcp exit $?"
+  stop; }
 "$@"
