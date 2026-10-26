@@ -49,7 +49,8 @@ New in 1.1 (unreleased):
   limit (saved before the crash) and the RAM speed against its rated speed (SMBIOS). Each
   cause lists its evidence and one piece of advice; it says *likely* or *possibly*, never
   certain, and changes no settings. In the report view (*Evidence ›*), in Hex's
-  announcement and in the `diagnose_crash` tool.
+  announcement and in the `diagnose_crash` tool, which can also diagnose an older
+  crash straight from the Event Log (`around: "2026-10-22"`).
 
 New in 1.0, all worked out on the PC from the readings Tachyon already takes (no extra
 polling, no cloud, no AI model):

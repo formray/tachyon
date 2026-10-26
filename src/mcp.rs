@@ -26,6 +26,67 @@ pub trait Source {
     fn blackbox(&mut self) -> Vec<crate::telemetry::Sample>;
     fn report(&mut self) -> Option<report::Report>;
     fn history(&mut self, n: usize) -> Vec<JobRecord>;
+    /// Windows Event Log entries in a window (System and Application logs).
+    fn events(&mut self, from_ms: i64, to_ms: i64) -> Result<Vec<crate::events::SysEvent>, String> {
+        crate::events::query(from_ms, to_ms, 400)
+    }
+    /// What the diagnosis knows about this PC now: RAM speed, GPU clock offsets.
+    fn context(&mut self) -> crate::diagnose::Context {
+        crate::diagnose::Context { ram: crate::sysinfo::ram_speed(), ..Default::default() }
+    }
+}
+
+/// A local date ("2026-10-22", the whole day) or date and time ("2026-10-22 18:40", an hour
+/// either side) as a window in ms.
+fn parse_around(s: &str) -> Option<(i64, i64)> {
+    use chrono::{Local, NaiveDate, NaiveDateTime, TimeZone};
+    let s = s.trim().replace('T', " ");
+    let local = |n: NaiveDateTime| Local.from_local_datetime(&n).earliest().map(|d| d.timestamp_millis());
+    if let Ok(n) = NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M") {
+        let t = local(n)?;
+        return Some((t - 3_600_000, t + 3_600_000));
+    }
+    let d = NaiveDate::parse_from_str(&s, "%Y-%m-%d").ok()?;
+    let t = local(d.and_hms_opt(0, 0, 0)?)?;
+    Some((t, t + 86_400_000))
+}
+
+/// `diagnose_crash` without a crash report (or for a date): the latest unexpected restart in the
+/// Event Log, diagnosed from the events around it and what Tachyon can read about the PC now.
+fn diagnose_from_event_log(args: &Value, src: &mut dyn Source, now: i64) -> Result<Value, String> {
+    let (from, to, what) = match args["around"].as_str() {
+        Some(a) => {
+            let (f, t) = parse_around(a).ok_or("`around` must be a local date (2026-10-22) or date and time (2026-10-22 18:40).")?;
+            (f, t, format!("around {}", a.trim()))
+        }
+        None => {
+            let days = args["days"].as_u64().unwrap_or(14).clamp(1, 60) as i64;
+            (now - days * 86_400_000, now, format!("in the last {days} days"))
+        }
+    };
+    let found = src.events(from, to)?;
+    let gpu_resets = found.iter().filter(|e| e.is_gpu()).count();
+    let Some(anchor) = found.iter().filter(|e| e.is_restart()).map(|e| e.t_ms).max() else {
+        return Ok(json!({
+            "diagnosis": null,
+            "source": "event_log",
+            "gpu_driver_events": gpu_resets,
+            "note": format!("No unexpected restart in the Windows Event Log {what}{}.", if gpu_resets > 0 { format!(", but {gpu_resets} GPU driver event(s)") } else { String::new() }),
+        }));
+    };
+    // the crash itself comes before the restart's reports (Kernel-Power 41, then the bug check)
+    let first = found.iter().filter(|e| e.is_restart() && e.t_ms >= anchor - 15 * 60_000).map(|e| e.t_ms).min().unwrap_or(anchor);
+    let ev = src.events(first - 60 * 60_000, anchor + 10 * 60_000)?;
+    let ctx = src.context();
+    let d = crate::diagnose::diagnose(report::Cause::Restart, &ev, true, &report::Peaks::default(), &[], None, &ctx);
+    let at = chrono::DateTime::from_timestamp_millis(first).map(|d| d.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string());
+    Ok(json!({
+        "source": "event_log",
+        "restart_at": at,
+        "diagnosis": d,
+        "events": ev.iter().map(|e| format!("{}  {}", chrono::DateTime::from_timestamp_millis(e.t_ms).map(|d| d.with_timezone(&chrono::Local).format("%m-%d %H:%M:%S").to_string()).unwrap_or_default(), e.describe())).collect::<Vec<_>>(),
+        "note": "From the Windows Event Log only: Tachyon has no readings from before this restart, and the GPU clock offsets and RAM speed are as they are now, not necessarily as they were then.",
+    }))
 }
 
 fn tool(name: &str, title: &str, description: &str, props: Value) -> Value {
@@ -77,8 +138,11 @@ pub fn tools() -> Value {
         tool(
             "diagnose_crash",
             "Why did it crash?",
-            "The probable causes of the last unexpected restart or GPU driver failure, ranked with a rough percentage: unstable RAM or EXPO/XMP, GPU overclock, power or PSU, overheating, driver timeout (TDR) or an application bug. Each with the evidence (bug check codes, NVIDIA driver resets, GPU timeout reports, WHEA errors, temperatures, power, clock offsets, memory speed) and one piece of advice. Estimates, never certain; Tachyon changes no settings.",
-            json!({})
+            "The probable causes of the last unexpected restart or GPU driver failure, ranked with a rough percentage: unstable RAM or EXPO/XMP, GPU overclock, power or PSU, overheating, driver timeout (TDR) or an application bug. Each with the evidence (bug check codes, NVIDIA driver resets, GPU timeout reports, WHEA errors, temperatures, power, clock offsets, memory speed) and one piece of advice. Uses Tachyon's crash report; without one (or with `around`) it diagnoses the latest unexpected restart in the Windows Event Log. Estimates, never certain; Tachyon changes no settings.",
+            json!({
+                "around": { "type": "string", "description": "Optional local date (2026-10-22) or date and time (2026-10-22 18:40) of a past crash to diagnose from the Event Log." },
+                "days": { "type": "integer", "description": "Without a crash report: how many days back to look (1-60, default 14).", "minimum": 1, "maximum": 60 },
+            })
         ),
         tool(
             "preflight",
@@ -174,10 +238,9 @@ fn call(name: &str, args: &Value, src: &mut dyn Source) -> Result<Value, String>
             Ok(json!({ "jobs": jobs, "count": jobs.len() }))
         }
         "diagnose_crash" => {
-            let Some(r) = src.report() else {
-                return Ok(
-                    json!({ "diagnosis": null, "note": "No crash report: Tachyon has not seen an unexpected restart or stop yet (it needs blackbox = true)." }),
-                );
+            let report = if args["around"].is_string() { None } else { src.report() };
+            let Some(r) = report else {
+                return diagnose_from_event_log(args, src, now);
             };
             let (d, recomputed) = match r.diagnosis.clone() {
                 Some(d) => (Some(d), false),
@@ -440,6 +503,15 @@ impl Source for Live {
     fn history(&mut self, n: usize) -> Vec<JobRecord> {
         self.dir.as_ref().map(|d| history::recent(&d.join("history"), n)).unwrap_or_default()
     }
+
+    fn context(&mut self) -> crate::diagnose::Context {
+        // the clock offsets now (read-only NVML queries); they may differ from the day of the crash
+        let oc = crate::nvml::Nvml::open().ok().map(|mut n| {
+            let sel = self.cfg.gpu_index.min(n.names.len().saturating_sub(1) as u32);
+            n.oc_info(sel)
+        });
+        crate::diagnose::Context { oc: oc.filter(|o| !o.is_empty()), oc_after: true, ram: crate::sysinfo::ram_speed() }
+    }
 }
 
 /// Run the server until stdin closes.
@@ -533,6 +605,8 @@ mod tests {
         jobs: Vec<JobRecord>,
         report: Option<report::Report>,
         status: Option<Value>,
+        events: Vec<crate::events::SysEvent>,
+        ctx: crate::diagnose::Context,
     }
 
     impl Source for Fake {
@@ -555,6 +629,12 @@ mod tests {
         fn history(&mut self, n: usize) -> Vec<JobRecord> {
             let k = self.jobs.len().saturating_sub(n);
             self.jobs[k..].to_vec()
+        }
+        fn events(&mut self, from: i64, to: i64) -> Result<Vec<crate::events::SysEvent>, String> {
+            Ok(self.events.iter().filter(|e| e.t_ms >= from && e.t_ms <= to).cloned().collect())
+        }
+        fn context(&mut self) -> crate::diagnose::Context {
+            self.ctx.clone()
         }
     }
 
@@ -693,12 +773,55 @@ mod tests {
     }
 
     #[test]
+    fn diagnose_crash_from_the_event_log() {
+        use crate::events::{KERNEL_POWER, SysEvent, WER_SYSTEM};
+        let call = |f: &mut Fake, a: Value| rpc(f, 5, "tools/call", json!({ "name": "diagnose_crash", "arguments": a }))["result"].clone();
+        let day = parse_around("2026-10-22").unwrap();
+        assert_eq!(day.1 - day.0, 86_400_000);
+        let at = parse_around("2026-10-22 18:40").unwrap();
+        let t = at.0 + 3_600_000;
+        let ev = |dt: i64, p: &str, id: u32, code: Option<&str>| SysEvent {
+            t_ms: t + dt * 1000,
+            provider: p.into(),
+            id,
+            level: 2,
+            code: code.map(Into::into),
+        };
+        let mut f = Fake {
+            on: true,
+            events: vec![
+                ev(-86_400, "nvlddmkm", 153, None), // a day earlier: outside the crash window
+                ev(-900, "nvlddmkm", 153, None),
+                ev(-60, "nvlddmkm", 153, None),
+                ev(90, KERNEL_POWER, 41, Some("0x0000001A")),
+                ev(150, WER_SYSTEM, 1001, Some("0x0000001a")),
+            ],
+            ctx: crate::diagnose::Context {
+                ram: Some(crate::sysinfo::RamSpeed { kind: "DDR5".into(), rated_mts: Some(4800), configured_mts: Some(6000), modules: 2 }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        for args in [json!({ "around": "2026-10-22" }), json!({ "around": "2026-10-22 18:40" })] {
+            let r = call(&mut f, args)["structuredContent"].clone();
+            assert_eq!(r["source"], "event_log");
+            assert_eq!(r["diagnosis"]["causes"][0]["suspect"], "ram", "{r:#}");
+            assert_eq!(r["events"].as_array().unwrap().len(), 4, "{r:#}");
+            assert!(r["note"].as_str().unwrap().contains("Event Log only"));
+        }
+        assert!(call(&mut f, json!({ "around": "22/10" }))["isError"] == true);
+        assert!(
+            call(&mut f, json!({ "around": "2026-10-21" }))["structuredContent"]["note"].as_str().unwrap().contains("1 GPU driver event")
+        );
+    }
+
+    #[test]
     fn diagnose_crash_from_the_report() {
         use crate::events::SysEvent;
         use crate::recorder::{PrevSession, Session};
         let call = |f: &mut Fake| rpc(f, 5, "tools/call", json!({ "name": "diagnose_crash", "arguments": {} }))["result"].clone();
         let mut f = Fake { on: true, ..Default::default() };
-        assert!(call(&mut f)["structuredContent"]["note"].as_str().unwrap().starts_with("No crash report"));
+        assert!(call(&mut f)["structuredContent"]["note"].as_str().unwrap().starts_with("No unexpected restart in the Windows Event Log"));
         let t0 = 1_790_000_040_000i64;
         let prev = PrevSession {
             session: Session { version: "1.0.1".into(), pid: 1, file: "a".into(), started_ms: t0, clean: false, ended_ms: None },

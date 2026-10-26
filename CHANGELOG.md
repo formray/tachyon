@@ -14,7 +14,7 @@ Two new answers, both worked out from what Tachyon already records. Read-only as
 **Crash diagnosis**
 - The crash report ranks the probable cause with a percentage: unstable RAM / EXPO, GPU overclock, power / PSU, overheating, driver timeout (TDR), application bug, each with its evidence and one piece of advice, and a confidence (*likely*, *possibly* or *unclear*). Never 100%; Tachyon changes no settings.
 - New evidence: the Application log (LiveKernelEvent 141/117 GPU timeout reports, application crashes), bug check codes from Kernel-Power 41 and WER 1001, the GPU clock offsets and power limit vs default (read once a minute and saved next to the flight recorder, so the report knows the settings from before the crash), and the RAM's configured vs rated speed from SMBIOS.
-- In the report view (with *Evidence ›*), Hex's crash announcement, `get_status` (`crash_report.probable_cause`) and the new MCP tool `diagnose_crash` (it also works out older 1.0 reports).
+- In the report view (with *Evidence ›*), Hex's crash announcement, `get_status` (`crash_report.probable_cause`) and the new MCP tool `diagnose_crash` (it also works out older 1.0 reports; without a report, or with `around: "2026-10-22"`, it diagnoses the latest unexpected restart in the Windows Event Log, with the RAM speed and clock offsets as they are now).
 
 **Build and tests**
 - 155 tests (132 in 1.0.1): diagnosis rules incl. the real EXPO case, the prediction and its thresholds, resolution parsing (fuzzed), job hints from a projects tree, SMBIOS parsing, the new MCP tools.
