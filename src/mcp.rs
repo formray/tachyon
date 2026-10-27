@@ -1056,7 +1056,7 @@ fn job_reports(args: &Value, src: &mut dyn Source, now: i64) -> Result<Value, St
                 .collect::<Vec<_>>()
         )
     };
-    // each with the comparison against the previous comparable marked job
+    // each with the comparison against the previous run of the same job (none: first run)
     let reps: Vec<Value> = r
         .iter()
         .map(|j| {
@@ -1066,7 +1066,6 @@ fn job_reports(args: &Value, src: &mut dyn Source, now: i64) -> Result<Value, St
                     x["compared_with"] = json!({
                         "job": c.prev_job,
                         "started": local_text(c.prev_start_ms, "%Y-%m-%d %H:%M:%S"),
-                        "same_job": c.same_job,
                     });
                     x["vs_previous"] = json!(c.sentence());
                 }

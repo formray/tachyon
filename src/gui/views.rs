@@ -144,7 +144,7 @@ impl App {
         if self.marked_cache.as_ref().is_some_and(|(d, _)| *d == done) {
             return;
         }
-        let reps = self.s.engine.history_dir().map(|d| tachyon::markers::reports(&d, 10)).unwrap_or_default();
+        let reps = self.s.engine.history_dir().map(|d| tachyon::markers::reports(&d, 200)).unwrap_or_default();
         self.marked_cache = Some((done, reps));
     }
 
@@ -649,12 +649,11 @@ impl App {
         y = status_tag(g, st, x0, y + 4.0);
         y = para(g, &verdict, x0 + 16.0, y, w - 16.0, Face::Sans, FS, LH, status_colours(st).0);
         y += GAP;
-        // against the previous comparable job: the same name first, else the last marked job
+        // against the previous run of the same job only
         let cmp = j.compare_in(&reps);
         let cap = match &cmp {
-            Some(c) if c.same_job => format!("VS THE LAST RUN · {} {}", day(c.prev_start_ms).to_uppercase(), hm(c.prev_start_ms)),
-            Some(c) => format!("VS THE LAST MARKED JOB · {}", c.prev_job.to_uppercase()),
-            None => "VS LAST TIME".to_string(),
+            Some(c) => format!("VS THE LAST RUN · {} {}", day(c.prev_start_ms).to_uppercase(), hm(c.prev_start_ms)),
+            None => "VS THE LAST RUN".to_string(),
         };
         let cap_rows = wrap_all(g, &cap, Face::SansBold, FS_CAP, w);
         for row in &cap_rows {

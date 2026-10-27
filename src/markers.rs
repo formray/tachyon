@@ -236,7 +236,7 @@ impl JobReport {
         share(self.power_limited_s, self.duration_s)
     }
 
-    /// The comparison with the previous comparable marked job in `reps` (any order).
+    /// The comparison with the previous run of the same job (same name, run counters ignored) in `reps` (any order).
     pub fn compare_in(&self, reps: &[JobReport]) -> Option<Comparison> {
         previous(reps, self).map(|p| compare(p, self))
     }
@@ -313,15 +313,14 @@ pub fn reason_gloss(r: &str) -> String {
     }
 }
 
-/// The previous comparable marked job: the latest earlier run with the same name (run counters
-/// ignored), otherwise the latest earlier marked job.
+/// The previous run of the same job: the latest earlier marked job with the same name (run
+/// counters ignored). A different job is never compared; none means "first run".
 pub fn previous<'a>(reps: &'a [JobReport], cur: &JobReport) -> Option<&'a JobReport> {
     let key = |j: &JobReport| crate::history::job_key(crate::history::JobKind::Render, &j.job);
-    let earlier = || reps.iter().filter(|r| r.end_ms <= cur.start_ms + 1000 && r.start_ms < cur.start_ms);
-    earlier().filter(|r| key(r) == key(cur)).max_by_key(|r| r.end_ms).or_else(|| earlier().max_by_key(|r| r.end_ms))
+    reps.iter().filter(|r| r.end_ms <= cur.start_ms + 1000 && r.start_ms < cur.start_ms && key(r) == key(cur)).max_by_key(|r| r.end_ms)
 }
 
-/// A job against the previous comparable one.
+/// A job against the previous run of the same job.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Comparison {
     pub prev_job: String,
@@ -412,8 +411,7 @@ pub fn merge_history(auto: Vec<crate::history::JobRecord>, marked: &[JobReport])
     let mut v: Vec<crate::history::JobRecord> = auto.into_iter().filter(|j| !duplicates_marked(j.start_ms, j.end_ms, &spans)).collect();
     for m in marked {
         let vs = match m.compare_in(marked) {
-            Some(c) if c.same_job => c.sentence(),
-            Some(c) => format!("Vs \"{}\": {}", c.prev_job, c.sentence()),
+            Some(c) => c.sentence(),
             None => FIRST_RUN.to_string(),
         };
         v.push(m.as_record(Some(vs)));
@@ -958,21 +956,15 @@ mod tests {
         include_str!("../tests/samples/marked_jobs_2026-10-26.jsonl").lines().filter_map(|l| serde_json::from_str(l).ok()).collect()
     }
 
-    /// "demo 1.2 heavy" has no earlier run of its own: it is compared with the last marked job,
-    /// "demo 1.2"; that one is the first run.
+    /// Only a previous run of the same job is compared: "demo 1.2 heavy" is not compared with
+    /// "demo 1.2" (a different job), so both are first runs.
     #[test]
-    fn job_compared_with_the_previous_comparable_one() {
+    fn job_compared_only_with_a_previous_run_of_the_same_job() {
         let reps = demo_reports();
         let heavy = reps.iter().find(|r| r.job == "demo 1.2 heavy").unwrap();
         let light = reps.iter().find(|r| r.job == "demo 1.2").unwrap();
         assert!(light.compare_in(&reps).is_none(), "first run");
-        let c = heavy.compare_in(&reps).unwrap();
-        assert_eq!((c.prev_job.as_str(), c.same_job), ("demo 1.2", false));
-        assert_eq!(
-            c.sentence(),
-            "Ran 2.6× as long, GPU +17 points (99% vs 82%), VRAM +8.7 GB, power +57 W on average, energy +18.1 Wh.",
-            "{c:?}"
-        );
+        assert!(heavy.compare_in(&reps).is_none(), "a different job is not compared");
         // the same job again matches by name, before any newer other job; speed is comparable
         let mut again = heavy.clone();
         again.job = "demo 1.2 heavy try 2".into();
@@ -986,7 +978,7 @@ mod tests {
         let all = vec![light.clone(), heavy.clone(), other, again.clone()];
         let c = again.compare_in(&all).unwrap();
         assert!(c.same_job);
-        assert_eq!(c.prev_start_ms, heavy.start_ms);
+        assert_eq!((c.prev_job.as_str(), c.prev_start_ms), ("demo 1.2 heavy", heavy.start_ms));
         assert!(c.sentence().starts_with("4% faster than last time, same GPU load (99%), VRAM +1.2 GB"), "{}", c.sentence());
     }
 
@@ -1030,7 +1022,7 @@ mod tests {
         );
         assert!(merged[3].key.starts_with(MARKED_KEY));
         assert_eq!(merged[2].vs_last.as_deref(), Some(FIRST_RUN));
-        assert!(merged[3].vs_last.as_deref().unwrap().starts_with("Vs \"demo 1.2\": Ran 2.6× as long"), "{:?}", merged[3].vs_last);
+        assert_eq!(merged[3].vs_last.as_deref(), Some(FIRST_RUN), "not compared with the other job");
         // a short overlap at the edge is not a duplicate
         assert!(!overlaps((0, 100_000), (90_000, 400_000)));
         assert!(overlaps((0, 100_000), (40_000, 400_000)));
