@@ -429,6 +429,10 @@ enum Btn {
     Why,
     /// "Other possible causes" / "more processes": the second level of detail
     Others,
+    /// the earlier marked jobs (job report), a fold of its own
+    Earlier,
+    /// the (i) icon: what the estimates are based on
+    Info,
     /// the marked-job report view
     Job,
     Settings,
@@ -523,6 +527,10 @@ struct App {
     show_why: bool,
     /// the other causes (report) or the other processes (job report) are shown
     show_others: bool,
+    /// the earlier marked jobs are shown (job report)
+    show_earlier: bool,
+    /// the (i) note is open (crash report evidence)
+    show_note: bool,
     /// marked-job counter and the reports read for the Job report view
     marked_cache: Option<(u64, Vec<tachyon::markers::JobReport>)>,
     /// finished-job counter and the jobs read for the History view
@@ -711,6 +719,8 @@ pub fn run() {
             },
             show_why: false,
             show_others: false,
+            show_earlier: false,
+            show_note: false,
             marked_cache: None,
             hist_cache: None,
             export_msg: None,
@@ -1277,6 +1287,16 @@ impl App {
             Btn::Job => self.open_view(View::Job),
             Btn::Others => {
                 self.show_others = !self.show_others;
+                self.fg_valid = false;
+                unsafe { self.frame(true) };
+            }
+            Btn::Earlier => {
+                self.show_earlier = !self.show_earlier;
+                self.fg_valid = false;
+                unsafe { self.frame(true) };
+            }
+            Btn::Info => {
+                self.show_note = !self.show_note;
                 self.fg_valid = false;
                 unsafe { self.frame(true) };
             }
@@ -1927,18 +1947,14 @@ impl App {
         let vram = gsr.and_then(|g| g.vram_used_mb.zip(g.vram_total_mb));
         let vc = vram.map(|(u, t)| level_text(th.vram_level(u as f32, t as f32))).unwrap_or(TEXT);
         let words = gsr.and_then(|g| g.throttle).map(throttle_words);
-        let is_red = |x: &str| x.starts_with("thermal") || x == "power brake" || x == "hardware slowdown";
+        let is_red = |x: &str| x.starts_with("heat") || x == "power brake" || x == "hardware slowdown";
         let (lim, limc) = match &words {
             None => ("not reported".to_string(), TEXT2),
             Some(w) if w.is_empty() => ("none".to_string(), T_CYAN),
             Some(w) => {
-                let c = if w.iter().any(|x| is_red(x)) {
-                    T_RED
-                } else if w.contains(&"power cap") {
-                    T_AMBER
-                } else {
-                    TEXT
-                };
+                // the power limit under load is normal: plain text; heat, a power brake or a
+                // hardware slowdown is worth a look
+                let c = if w.iter().any(|x| is_red(x)) { views::status_colours(tachyon::status::Status::Look).0 } else { TEXT };
                 // never cut a word: the first reason, and how many more ("Why?" lists them all)
                 let t = if w.len() > 1 { format!("{} +{}", w[0], w.len() - 1) } else { w[0].to_string() };
                 (t, c)
@@ -1948,10 +1964,8 @@ impl App {
         let (link, linkc) = match s.insights.pcie.as_ref() {
             Some(l) => {
                 use tachyon::pcie::State;
-                let c = match l.state {
-                    Some(State::DegradedGen | State::DegradedWidth) => T_AMBER,
-                    _ => TEXT,
-                };
+                let degraded = matches!(l.state, Some(State::DegradedGen | State::DegradedWidth));
+                let c = views::status_colours(tachyon::status::of_pcie(degraded)).0;
                 let word = match l.state {
                     Some(State::IdleSaving) => " · idle",
                     Some(State::DegradedGen | State::DegradedWidth) => " · slow",

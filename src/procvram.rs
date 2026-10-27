@@ -116,6 +116,8 @@ pub fn summary(points: &[Point], from: i64, to: i64, name: Option<&str>, n: usiz
         peak: f32,
         peak_t: i64,
         area: f64,
+        /// Time (ms) the process had readings: its average is over this, not the whole window.
+        present: f64,
         first: i64,
         last_seen: i64,
         last_mb: f32,
@@ -148,6 +150,7 @@ pub fn summary(points: &[Point], from: i64, to: i64, name: Option<&str>, n: usiz
                 peak: 0.0,
                 peak_t: start,
                 area: 0.0,
+                present: 0.0,
                 first: start,
                 last_seen: start,
                 last_mb: 0.0,
@@ -159,6 +162,7 @@ pub fn summary(points: &[Point], from: i64, to: i64, name: Option<&str>, n: usiz
                 a.peak_t = start;
             }
             a.area += mb as f64 * span;
+            a.present += span;
             a.last_seen = end.max(start);
             a.last_mb = mb;
             for pid in pids {
@@ -171,9 +175,6 @@ pub fn summary(points: &[Point], from: i64, to: i64, name: Option<&str>, n: usiz
             }
         }
     }
-    // the average counts only the time with readings (not before the first one)
-    let covered_from = points.first().map_or(from, |p| p.t.max(from));
-    let window = (to - covered_from).max(1) as f64;
     let hm = |t: i64| crate::telemetry::Sample { t_ms: t, ..Default::default() }.local().format("%Y-%m-%d %H:%M:%S").to_string();
     let mut rows: Vec<(String, Acc)> = m.into_iter().collect();
     rows.sort_by(|a, b| b.1.peak.total_cmp(&a.1.peak));
@@ -188,7 +189,9 @@ pub fn summary(points: &[Point], from: i64, to: i64, name: Option<&str>, n: usiz
                 "name": nm,
                 "peak_mb": a.peak,
                 "peak_at": hm(a.peak_t),
-                "avg_mb": ((a.area / window) as f32).round(),
+                // over the time the process was running, not the whole window
+                "avg_mb": ((a.area / a.present.max(1.0)) as f32).round(),
+                "running_s": (a.present / 1000.0).round(),
                 "last_mb": a.last_mb,
                 "first_seen": hm(a.first),
                 "last_seen": hm(a.last_seen.min(to)),
@@ -404,13 +407,22 @@ mod tests {
         assert_eq!(s["top"][0]["name"], "python.exe");
         assert_eq!(s["top"][0]["peak_mb"], 13000.0, "two python workers together");
         assert_eq!(s["top"][0]["pids"], json!([10, 11]));
-        // 2000 for 30 s + 13000 for 30 s over 120 s
-        assert_eq!(s["top"][0]["avg_mb"], 3750.0);
+        // 2000 for 30 s + 13000 for 30 s, over the 60 s python was running (not the 120 s window)
+        assert_eq!(s["top"][0]["avg_mb"], 7500.0);
+        assert_eq!(s["top"][0]["running_s"], 60.0);
         assert_eq!(s["top"][1]["avg_mb"], 200.0);
         assert_eq!(s["peak_total_mb"], 13200.0);
         // a window starting before the first reading: the average is over the recorded time
         let s2 = summary(&back[1..], t0 - 600_000, t0 + 120_000, None, 10);
-        assert_eq!(s2["top"][0]["avg_mb"], 3750.0);
+        assert_eq!(s2["top"][0]["avg_mb"], 7500.0);
+        // a process started late at a constant 574 MB (the 26 Oct heavy demo): its average is 574
+        let late = vec![
+            Point { t: t0, p: vec![("dwm.exe".into(), 4, 700.0)] },
+            Point { t: t0 + 200_000, p: vec![("python.exe".into(), 9, 574.0), ("dwm.exe".into(), 4, 700.0)] },
+        ];
+        let s3 = summary(&late, t0, t0 + 300_000, Some("python"), 10);
+        assert_eq!(s3["top"][0]["avg_mb"], 574.0, "{s3}");
+        assert_eq!(s3["top"][0]["running_s"], 100.0);
         let f = summary(&back, t0, t0 + 120_000, Some("DWM"), 10);
         assert_eq!(f["processes"], 1);
         let _ = std::fs::remove_dir_all(&d);

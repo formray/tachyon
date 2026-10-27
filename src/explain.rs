@@ -39,13 +39,13 @@ impl Kind {
             Kind::Light => "light load",
             Kind::Mixed => "no clear limit",
             Kind::GpuBound => "GPU-bound",
-            Kind::PowerLimit => "GPU-bound at power cap",
+            Kind::PowerLimit => "GPU-bound at the power limit",
             Kind::Decode => "video decode",
             Kind::Encode => "video encode",
             Kind::CpuThread => "single CPU thread",
             Kind::CpuAll => "CPU-bound",
             Kind::Vram => "VRAM pressure",
-            Kind::Thermal => "thermal throttling",
+            Kind::Thermal => "slowed by heat",
             Kind::Pcie => "PCIe transfers",
         }
     }
@@ -322,7 +322,7 @@ pub fn assess(w: &[Sample]) -> Option<Verdict> {
         return Some(v(
             Kind::PowerLimit,
             0.55 + a.power_frac * 0.3,
-            format!("The GPU is the limit and runs at its power cap{p}; clocks dip to stay under it. That is normal for heavy work."),
+            format!("The GPU is the limit and runs at its power limit{p}; clocks dip to stay under it. That is normal for heavy work."),
             by_sm(),
         ));
     }

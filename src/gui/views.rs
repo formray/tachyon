@@ -4,6 +4,7 @@ use super::*;
 use tachyon::history::{JobKind, JobRecord, fmt_duration};
 use tachyon::preflight::Fit;
 use tachyon::report::{Cause, Severity, gb};
+use tachyon::status::Status;
 
 /// Type scale: body, headings/verdicts/values, and the small-caps labels. Line heights and gaps.
 pub(super) const FS: f32 = 12.5;
@@ -28,7 +29,19 @@ pub(super) enum View {
 pub(super) fn wrap_g(g: &mut G, s: &str, face: Face, size: f32, maxw: f32, max_rows: usize) -> Vec<String> {
     let mut rows: Vec<String> = vec![];
     let mut cur = String::new();
-    let words: Vec<&str> = s.split(' ').filter(|w| !w.is_empty()).collect();
+    // a unit stays with its number ("57 W" never breaks between the two)
+    let mut glued: Vec<String> = vec![];
+    for w in s.split(' ').filter(|w| !w.is_empty()) {
+        let unit = matches!(w.trim_end_matches([',', '.', ';', ')']), "W" | "GB" | "MB" | "Wh" | "%" | "°C" | "s" | "MHz" | "min" | "h");
+        match glued.last_mut() {
+            Some(prev) if unit && prev.chars().last().is_some_and(|c| c.is_ascii_digit()) => {
+                prev.push(' ');
+                prev.push_str(w);
+            }
+            _ => glued.push(w.to_string()),
+        }
+    }
+    let words: Vec<&str> = glued.iter().map(String::as_str).collect();
     for (i, w) in words.iter().enumerate() {
         let cand = if cur.is_empty() { w.to_string() } else { format!("{cur} {w}") };
         if cur.is_empty() || g.measure(&cand, face, size).0 <= maxw {
@@ -75,6 +88,8 @@ impl App {
             // each view opens at its first level of detail
             self.show_others = false;
             self.show_why = false;
+            self.show_earlier = false;
+            self.show_note = false;
         }
         self.view = v;
         if v == View::Settings {
@@ -144,7 +159,7 @@ impl App {
             .filter(|r| i.report_new || tachyon::telemetry::now_ms() - r.created_ms < 24 * 3600 * 1000)
             .filter(|r| r.severity() != Severity::Note);
         if let Some(r) = recent_report {
-            let (tc, ac) = sev_colours(r.severity());
+            let (tc, ac) = status_colours(Status::from(r.severity()));
             let lw_ = g.measure("Open report ›", Face::SansSemi, FS).0;
             let rows = wrap_all(g, &r.headline, Face::SansSemi, FS, w - lw_ - 30.0);
             let h = rows.len() as f32 * LH + 12.0;
@@ -166,7 +181,7 @@ impl App {
             let why = if self.show_why { "Hide numbers" } else { "Why? ›" };
             self.link(g, why, xr, y + 10.5, Btn::Why);
             y += 18.0;
-            let c = if v.kind.is_problem() { T_AMBER } else { TEXT };
+            let c = status_colours(tachyon::status::of_bottleneck(v.kind.is_problem())).0;
             // At least two rows, so a sentence that rewraps does not move the static layer below.
             let rows = wrap_all(g, &v.sentence, Face::Sans, FS, w);
             let n = rows.len().max(2);
@@ -186,10 +201,9 @@ impl App {
         }
         // the pre-render check: the verdict when it matters, a short line when the job should fit
         if let Some(p) = i.preflight.as_ref().filter(|p| p.fit != Fit::Unknown) {
-            let (text, c) = match p.fit {
-                Fit::WontFit => (p.sentence.clone(), T_RED),
-                Fit::Tight => (p.sentence.clone(), T_AMBER),
-                _ => (p.short_line(), TEXT2),
+            let (text, c) = match Status::from(p.fit) {
+                Status::Fine => (p.short_line(), TEXT2),
+                st => (p.sentence.clone(), status_colours(st).0),
             };
             y = para_live(g, &text, x0, y, w, Face::SansSemi, FS, LH, c);
             if let Some(h) = p.hog_note.as_ref().filter(|_| p.fit != Fit::Fits) {
@@ -199,13 +213,21 @@ impl App {
         }
         // an idle-hog note is already part of the check when it warns
         let pf_hogs = i.preflight.as_ref().is_some_and(|p| p.hog_note.is_some() && p.fit != Fit::Fits);
-        let vram_note =
-            i.forecast.warning.clone().map(|t| (t, T_RED)).or_else(|| i.forecast.hog_sentence().filter(|_| !pf_hogs).map(|t| (t, TEXT2)));
+        let vram_note = i
+            .forecast
+            .warning
+            .clone()
+            .map(|t| (t, status_colours(Status::Act).0))
+            .or_else(|| i.forecast.hog_sentence().filter(|_| !pf_hogs).map(|t| (t, TEXT2)));
         if let Some((t, c)) = vram_note {
             y = para_live(g, &t, x0, y, w, Face::SansSemi, FS, LH, c);
             y += GAP_S;
         }
         let job_line = match (&i.live_job, &i.last_job) {
+            _ if !i.marked_open.is_empty() => {
+                let m = &i.marked_open[i.marked_open.len() - 1];
+                Some((format!("Recording marked job: {}", m.job), fmt_duration(m.running_s)))
+            }
             (Some(l), _) => Some((
                 format!("Recording {}: {}", if l.kind == JobKind::Render { "job" } else { "GPU session" }, l.name),
                 fmt_duration(l.elapsed_s),
@@ -298,8 +320,8 @@ impl App {
             }
             return self.export_note(g, x0, w, y + GAP_S);
         };
-        let sev = r.severity();
-        let (tc, ac) = sev_colours(sev);
+        let st = Status::from(r.severity());
+        let tc = status_colours(st).0;
         let top = r.diagnosis.as_ref().and_then(|d| d.top()).map(|c| c.suspect);
         let what = match (r.cause, top) {
             (Cause::Restart, _) => "UNEXPECTED RESTART",
@@ -310,8 +332,8 @@ impl App {
         let cap = format!("{what} · {}", day(r.stopped_ms).to_uppercase());
         self.view_header(g, x0, xr, &hm(r.stopped_ms), &cap, Some(("Export ›", Btn::Export)));
         let mut y = FIELD_H + 6.0;
-        // 1. the verdict: what happened, is the PC OK, what to do
-        g.stat(|g| g.dot(x0 + 4.0, y + 10.0, 4.0, ac, 1.0));
+        // 1. the verdict: the status (dot and words), what happened, is the PC OK, what to do
+        y = status_tag(g, st, x0, y);
         y = para(g, &r.verdict(), x0 + 16.0, y, w - 16.0, Face::SansSemi, FS_H, LH_H, tc);
         y = para(g, &r.just_before, x0 + 16.0, y + 2.0, w - 16.0, Face::Sans, FS, LH, TEXT2);
         y += GAP;
@@ -320,19 +342,19 @@ impl App {
             if self.show_why {
                 // evidence open: the cause shrinks to one line to leave the room to the evidence
                 if let Some(c) = d.top() {
-                    let pct = format!("{}%", c.percent);
-                    let pw = g.measure(&pct, Face::SansSemi, FS).0 + 12.0;
+                    let share = d.share(c);
+                    let pw = g.measure(&share, Face::SansSemi, FS).0 + 12.0;
                     let rows = wrap_all(g, &c.label, Face::SansSemi, FS, w - pw);
                     g.stat(|g| {
                         for (k, row) in rows.iter().enumerate() {
                             g.text(row, x0, y + 13.5 + LH * k as f32, Face::SansSemi, FS, TEXT, H::L, V::Base);
                         }
-                        g.text(&pct, xr, y + 13.5, Face::SansSemi, FS, TEXT2, H::Rt, V::Base);
+                        g.text(&share, xr, y + 13.5, Face::SansSemi, FS, TEXT2, H::Rt, V::Base);
                     });
                     y += LH * rows.len() as f32 + GAP_S;
                 }
             } else {
-                y = self.draw_diagnosis(g, d, sev, x0, xr, y);
+                y = self.draw_diagnosis(g, d, r.card_action(), st, x0, xr, y);
             }
         }
         // 3. the raw evidence, hidden until asked for
@@ -343,8 +365,18 @@ impl App {
         self.export_note(g, x0, w, y + GAP_S)
     }
 
-    /// The top cause as a card (label, share, plain words, one action); the others behind a row.
-    fn draw_diagnosis(&mut self, g: &mut G, d: &tachyon::diagnose::Diagnosis, sev: Severity, x0: f32, xr: f32, mut y: f32) -> f32 {
+    /// The top cause as a card (label, its share, plain words, one action); the others behind a
+    /// row. Shares are percentages only when causes compete, otherwise a word ("certain").
+    fn draw_diagnosis(
+        &mut self,
+        g: &mut G,
+        d: &tachyon::diagnose::Diagnosis,
+        action: Option<String>,
+        st: Status,
+        x0: f32,
+        xr: f32,
+        mut y: f32,
+    ) -> f32 {
         let w = xr - x0;
         let Some(c) = d.top() else {
             y = para(g, &d.sentence, x0, y, w, Face::Sans, FS, LH, TEXT2);
@@ -358,16 +390,18 @@ impl App {
         };
         g.stat(|g| g.cap(&cap, x0, y + 10.0, FS_CAP, H::L, V::Base));
         y += 18.0;
-        let (tc, ac) = sev_colours(sev);
+        let (tc, ac) = status_colours(st);
+        let competing = d.competing();
         let pad = 14.0;
         let iw = w - 2.0 * pad + 16.0;
-        let pct = format!("{}%", c.percent);
-        let pw = g.measure(&pct, Face::SansSemi, FS_H).0 + 12.0;
+        let share = d.share(c);
+        let pw = g.measure(&share, Face::SansSemi, FS_H).0 + 12.0;
         let label_rows = wrap_all(g, &c.label, Face::SansSemi, FS_H, iw - pw);
         let plain_rows = wrap_all(g, c.suspect.plain(), Face::Sans, FS, iw);
-        let act = if c.advice.starts_with("Nothing") { c.advice.clone() } else { format!("What to do: {}", c.advice) };
-        let act_rows = wrap_all(g, &act, Face::Sans, FS, iw);
-        let h = pad + label_rows.len() as f32 * LH_H + 10.0 + plain_rows.len() as f32 * LH + 6.0 + act_rows.len() as f32 * LH + pad - 4.0;
+        let act_rows = action.map(|a| wrap_all(g, &a, Face::Sans, FS, iw)).unwrap_or_default();
+        let bar_h = if competing { 10.0 } else { 4.0 };
+        let act_h = if act_rows.is_empty() { 0.0 } else { 6.0 + act_rows.len() as f32 * LH };
+        let h = pad + label_rows.len() as f32 * LH_H + bar_h + plain_rows.len() as f32 * LH + act_h + pad - 4.0;
         let card = R::new(x0 - 8.0, y, w + 16.0, h);
         let (lx, frac) = (x0 - 8.0 + pad, c.percent as f32 / 100.0);
         g.stat(|g| {
@@ -375,23 +409,28 @@ impl App {
             g.fill_rrect(R::new(card.x, card.y + 14.0, 3.0, card.h - 28.0), 1.5, ac, 0.9);
             let mut yy = y + pad;
             for (k, row) in label_rows.iter().enumerate() {
-                g.text(row, lx, yy + 15.0, Face::SansSemi, FS_H, if sev == Severity::Note { TEXT } else { tc }, H::L, V::Base);
+                g.text(row, lx, yy + 15.0, Face::SansSemi, FS_H, if st == Status::Fine { TEXT } else { tc }, H::L, V::Base);
                 if k == 0 {
-                    g.text(&pct, card.r() - pad, yy + 15.0, Face::SansSemi, FS_H, TEXT2, H::Rt, V::Base);
+                    g.text(&share, card.r() - pad, yy + 15.0, Face::SansSemi, FS_H, TEXT2, H::Rt, V::Base);
                 }
                 yy += LH_H;
             }
-            g.fill_rrect(R::new(lx, yy + 2.0, iw, 3.0), 1.5, (255, 255, 255), 0.12);
-            g.fill_rrect(R::new(lx, yy + 2.0, (iw * frac).max(3.0), 3.0), 1.5, ac, 0.85);
-            yy += 10.0;
+            // a share bar only when causes compete
+            if competing {
+                g.fill_rrect(R::new(lx, yy + 2.0, iw, 3.0), 1.5, (255, 255, 255), 0.12);
+                g.fill_rrect(R::new(lx, yy + 2.0, (iw * frac).max(3.0), 3.0), 1.5, ac, 0.85);
+            }
+            yy += bar_h;
             for row in &plain_rows {
                 g.text(row, lx, yy + 13.5, Face::Sans, FS, TEXT2, H::L, V::Base);
                 yy += LH;
             }
-            yy += 6.0;
-            for row in &act_rows {
-                g.text(row, lx, yy + 13.5, Face::Sans, FS, TEXT, H::L, V::Base);
-                yy += LH;
+            if !act_rows.is_empty() {
+                yy += 6.0;
+                for row in &act_rows {
+                    g.text(row, lx, yy + 13.5, Face::Sans, FS, TEXT, H::L, V::Base);
+                    yy += LH;
+                }
             }
         });
         y += h + GAP_S;
@@ -402,14 +441,14 @@ impl App {
             if self.show_others {
                 y += GAP_S;
                 for o in others {
-                    let pct = format!("{}%", o.percent);
-                    let pw = g.measure(&pct, Face::SansSemi, FS).0 + 12.0;
+                    let share = d.share(o);
+                    let pw = g.measure(&share, Face::SansSemi, FS).0 + 12.0;
                     let rows = wrap_all(g, &o.label, Face::SansSemi, FS, w - pw);
                     g.stat(|g| {
                         for (k, row) in rows.iter().enumerate() {
                             g.text(row, x0, y + 13.5 + LH * k as f32, Face::SansSemi, FS, TEXT, H::L, V::Base);
                         }
-                        g.text(&pct, xr, y + 13.5, Face::SansSemi, FS, TEXT2, H::Rt, V::Base);
+                        g.text(&share, xr, y + 13.5, Face::SansSemi, FS, TEXT2, H::Rt, V::Base);
                     });
                     y += LH * rows.len() as f32;
                     y = para(g, o.suspect.plain(), x0, y, w, Face::Sans, FS, LH, TEXT2);
@@ -424,6 +463,14 @@ impl App {
     /// stop and, apart, what happened after it.
     fn draw_evidence(&mut self, g: &mut G, r: &tachyon::report::Report, x0: f32, xr: f32, mut y: f32, max_y: f32) -> f32 {
         let w = xr - x0;
+        // what the estimates rest on: a small (i) on the first row, its text on demand
+        if let Some(note) = r.diagnosis.as_ref().map(|d| d.note.clone()).filter(|n| !n.is_empty()) {
+            self.info_icon(g, xr - 8.0, y + 7.0);
+            if self.show_note {
+                y = para(g, &note, x0, y, w - 28.0, Face::Sans, FS, LH, TEXT2);
+                y += GAP_S;
+            }
+        }
         if let Some(d) = &r.diagnosis {
             let mut ev: Vec<String> = d.top().map(|c| c.evidence.clone()).unwrap_or_default();
             ev.extend(d.hints.iter().cloned());
@@ -559,10 +606,17 @@ impl App {
             }
             y = para(g, "Logged after Tachyon stopped, so not used as evidence.", x0, y + 2.0, w, Face::Sans, FS, LH, TEXT2);
         }
-        if let Some(d) = r.diagnosis.as_ref().filter(|_| y + GAP_S + 2.0 * LH <= max_y) {
-            y = para(g, &d.note, x0, y + GAP_S, w, Face::Sans, FS, LH, TEXT2);
-        }
         y
+    }
+
+    /// The small (i) icon: opens or closes a note (`show_note`).
+    fn info_icon(&mut self, g: &mut G, cx: f32, cy: f32) {
+        let hov = self.hover == Some(Btn::Info) || self.show_note;
+        g.stat(|g| {
+            g.dot(cx, cy, 8.0, (255, 255, 255), if hov { 0.22 } else { 0.12 });
+            g.text("i", cx, cy + 4.5, Face::SansBold, 11.0, if hov { TEXT } else { T_CYAN }, H::C, V::Base);
+        });
+        self.hits.push((R::new(cx - 12.0, cy - 12.0, 24.0, 24.0), Btn::Info));
     }
 
     fn export_note(&mut self, g: &mut G, x0: f32, w: f32, y: f32) -> f32 {
@@ -590,14 +644,33 @@ impl App {
         self.view_header(g, x0, xr, &big, &cap, Some(("History ›", Btn::History)));
         let mut y = FIELD_H + 6.0;
         let (verdict, tone) = j.verdict();
-        let (tc, ac) = if tone == tachyon::markers::Tone::Warning { (T_AMBER, AMBER) } else { (TEXT, NEUTRAL) };
+        let st = Status::from(tone);
         y = para(g, &j.job, x0, y, w, Face::SansSemi, FS_H, LH_H, TEXT);
-        g.stat(|g| g.dot(x0 + 4.0, y + 10.0, 4.0, ac, 1.0));
-        y = para(g, &verdict, x0 + 16.0, y + 2.0, w - 16.0, Face::Sans, FS, LH, tc);
+        y = status_tag(g, st, x0, y + 4.0);
+        y = para(g, &verdict, x0 + 16.0, y, w - 16.0, Face::Sans, FS, LH, status_colours(st).0);
         y += GAP;
-        // the numbers, aligned
+        // against the previous comparable job: the same name first, else the last marked job
+        let cmp = j.compare_in(&reps);
+        let cap = match &cmp {
+            Some(c) if c.same_job => format!("VS THE LAST RUN · {} {}", day(c.prev_start_ms).to_uppercase(), hm(c.prev_start_ms)),
+            Some(c) => format!("VS THE LAST MARKED JOB · {}", c.prev_job.to_uppercase()),
+            None => "VS LAST TIME".to_string(),
+        };
+        let cap_rows = wrap_all(g, &cap, Face::SansBold, FS_CAP, w);
+        for row in &cap_rows {
+            g.stat(|g| g.cap(row, x0, y + 10.0, FS_CAP, H::L, V::Base));
+            y += 16.0;
+        }
+        y += 2.0;
+        y = match &cmp {
+            Some(c) => para(g, &c.sentence(), x0, y, w, Face::Sans, FS, LH, TEXT),
+            None => para(g, tachyon::markers::FIRST_RUN, x0, y, w, Face::Sans, FS, LH, TEXT2),
+        };
+        y += GAP;
+        // the numbers, aligned; limits as a share of the job, in plain words
         let f1 = |v: Option<f32>| v.map(|v| format!("{v:.0}")).unwrap_or("—".into());
         let gb1 = |v: Option<f32>| v.map(|v| format!("{:.1}", v / 1024.0)).unwrap_or("—".into());
+        let pct = |v: f64| tachyon::markers::share(v, j.duration_s).trim_end_matches('%').to_string();
         let cells: Vec<(&str, String, String)> = vec![
             ("GPU average", f1(j.gpu_util_avg), "%".into()),
             ("GPU peak", j.gpu_util_peak.map(|v| v.to_string()).unwrap_or("—".into()), "%".into()),
@@ -607,17 +680,19 @@ impl App {
             ("Energy", j.energy_wh.map(|e| format!("{e:.1}")).unwrap_or("—".into()), "Wh".into()),
             ("Temp. average", f1(j.temp_avg_c), "°C".into()),
             ("Temp. peak", j.temp_peak_c.map(|v| v.to_string()).unwrap_or("—".into()), "°C".into()),
-            ("Power cap", format!("{:.0}", j.power_limited_s), "s".into()),
-            ("Heat limit", format!("{:.0}", j.thermal_limited_s), "s".into()),
+            ("At power limit", pct(j.power_limited_s), "%".into()),
+            ("Slowed by heat", pct(j.thermal_limited_s), "%".into()),
         ];
         g.stat(|g| g.cap("THE NUMBERS", x0, y + 10.0, FS_CAP, H::L, V::Base));
         y += 16.0;
         y = num_grid(g, &cells, x0, y, w);
+        y = para(g, "Limits: share of the job's time the clocks were held back.", x0, y + 4.0, w, Face::Sans, FS, LH, TEXT2);
         y += GAP;
         // the PCIe link
-        g.stat(|g| g.cap("PCIE LINK", x0, y + 10.0, FS_CAP, H::L, V::Base));
+        let degraded = j.pcie["degraded_events"].as_u64().unwrap_or(0) > 0;
+        g.stat(|g| g.cap("PCIE LINK (GPU TO PC)", x0, y + 10.0, FS_CAP, H::L, V::Base));
         y += 18.0;
-        y = para(g, &j.pcie_sentence(), x0, y, w, Face::Sans, FS, LH, TEXT);
+        y = para(g, &j.pcie_sentence(), x0, y, w, Face::Sans, FS, LH, status_colours(tachyon::status::of_pcie(degraded)).0);
         y += GAP;
         // who held the VRAM: three rows with a bar, the rest folded
         if !j.top_vram_processes.is_empty() {
@@ -652,29 +727,29 @@ impl App {
             }
             y += GAP;
         }
-        // details: why the clocks were limited, and the earlier marked jobs
-        y = self.toggle_row(g, "Clock limits and earlier jobs", self.show_why, x0, xr, y, Btn::Why);
-        if self.show_why {
-            y += GAP_S;
-            if !j.clock_limit_reasons.is_empty() {
-                g.stat(|g| g.cap("WHAT LIMITED THE CLOCKS", x0, y + 10.0, FS_CAP, H::L, V::Base));
-                y += 18.0;
-                y = bullets(g, &j.clock_limit_reasons, x0, y, w, TEXT2, true);
+        // two folds: why the clocks were held back, and the earlier marked jobs
+        if !j.clock_limit_reasons.is_empty() {
+            y = self.toggle_row(g, "What held the clocks back", self.show_why, x0, xr, y, Btn::Why);
+            if self.show_why {
                 y += GAP_S;
+                let glossed: Vec<String> = j.clock_limit_reasons.iter().map(|r| tachyon::markers::reason_gloss(r)).collect();
+                y = bullets(g, &glossed, x0, y, w, TEXT2, true);
             }
-            let earlier: Vec<String> = reps
-                .iter()
-                .rev()
-                .skip(1)
-                .map(|r| {
-                    let e = r.energy_wh.map(|e| format!(" · {e:.1} Wh")).unwrap_or_default();
-                    format!("{} · {} {} · {}{e}", r.job, day(r.start_ms), hm(r.start_ms), fmt_duration(r.duration_s))
-                })
-                .collect();
-            let max_y = self.max_panel_h() - 60.0;
-            if !earlier.is_empty() && y + 18.0 + earlier.len().min(3) as f32 * (2.0 * LH) <= max_y {
-                g.stat(|g| g.cap("EARLIER MARKED JOBS", x0, y + 10.0, FS_CAP, H::L, V::Base));
-                y += 18.0;
+            y += GAP_S;
+        }
+        let earlier: Vec<String> = reps
+            .iter()
+            .rev()
+            .skip(1)
+            .map(|r| {
+                let e = r.energy_wh.map(|e| format!(" · {e:.1} Wh")).unwrap_or_default();
+                format!("{} · {} {} · {}{e}", r.job, day(r.start_ms), hm(r.start_ms), fmt_duration(r.duration_s))
+            })
+            .collect();
+        if !earlier.is_empty() {
+            y = self.toggle_row(g, &format!("Earlier marked jobs ({})", earlier.len()), self.show_earlier, x0, xr, y, Btn::Earlier);
+            if self.show_earlier {
+                y += GAP_S;
                 y = bullets(g, &earlier, x0, y, w, TEXT2, true);
             }
         }
@@ -686,7 +761,10 @@ impl App {
         let w = xr - x0;
         self.refresh_history();
         self.refresh_marked();
-        let jobs: Vec<JobRecord> = self.hist_cache.as_ref().map(|(_, j)| j.clone()).unwrap_or_default();
+        // the marked jobs are listed too, instead of the automatic job recorded for the same work
+        let marked = self.marked_cache.as_ref().map(|(_, r)| r.clone()).unwrap_or_default();
+        let jobs: Vec<JobRecord> =
+            tachyon::markers::merge_history(self.hist_cache.as_ref().map(|(_, j)| j.clone()).unwrap_or_default(), &marked);
         let total_wh: f64 = jobs.iter().filter_map(|j| j.energy_wh).sum();
         let cap =
             if total_wh > 0.0 { format!("JOBS RECORDED · {:.2} KWH IN TOTAL", total_wh / 1000.0) } else { "JOBS RECORDED".to_string() };
@@ -706,12 +784,24 @@ impl App {
             return para(g, msg, x0, y, w, Face::Sans, FS, LH, TEXT2);
         }
         let max_y = self.max_panel_h() - 30.0;
-        let row_h = 66.0;
-        let n = (((max_y - y) / (row_h + 8.0)).floor() as usize).clamp(1, jobs.len());
-        for j in jobs.iter().rev().take(n) {
-            let r = R::new(x0 - 8.0, y, w + 16.0, row_h);
+        let mut shown = 0usize;
+        for j in jobs.iter().rev() {
+            let third_rows = j.vs_last.as_ref().map(|v| wrap_g(g, v, Face::Sans, FS, w - 8.0, 2).len()).unwrap_or(1).max(1);
             let right = format!("{} · {} {}", fmt_duration(j.duration_s), day(j.start_ms), hm(j.start_ms));
+            // a long name wraps beside the time (at most two rows), never cut short mid-word
+            let rw = g.measure(&right, Face::Sans, FS).0;
+            let name_rows = wrap_g(g, &j.name, Face::SansSemi, FS, w - rw - 22.0, 2);
+            let extra = 18.0 * (name_rows.len().max(1) - 1) as f32;
+            let row_h = 48.0 + 18.0 * third_rows as f32 + extra;
+            if shown > 0 && y + row_h > max_y {
+                break;
+            }
+            shown += 1;
+            let r = R::new(x0 - 8.0, y, w + 16.0, row_h);
             let mut meta = vec![];
+            if j.key.starts_with(tachyon::markers::MARKED_KEY) {
+                meta.push("marked job".to_string());
+            }
             if let Some(a) = j.avg_gpu {
                 meta.push(format!("GPU {a:.0}%"));
             }
@@ -731,27 +821,31 @@ impl App {
                 meta.push(format!("{c:.2} {cur}"));
             }
             if j.thermal_throttled_s >= 30.0 {
-                meta.push(format!("heat limit {}", fmt_duration(j.thermal_throttled_s)));
+                meta.push(format!("slowed by heat {}", tachyon::markers::share(j.thermal_throttled_s, j.duration_s)));
             } else if j.power_throttled_s >= 30.0 {
-                meta.push(format!("power cap {}", fmt_duration(j.power_throttled_s)));
+                meta.push(format!("at power limit {}", tachyon::markers::share(j.power_throttled_s, j.duration_s)));
             }
             let third =
                 j.vs_last.clone().map(|v| (v, T_CYAN)).or_else(|| j.bottleneck.clone().map(|b| (format!("Main limit: {b}"), TEXT2)));
             g.stat(|g| {
                 g.fill_rrect(r, 16.0, (255, 255, 255), ROW_A);
-                let rr = g.text(&right, r.r() - 12.0, y + 21.0, Face::Sans, FS, TEXT2, H::Rt, V::Base);
-                let name = g.fit(&j.name, Face::SansSemi, FS, rr.x - x0 - 14.0);
-                g.text(&name, x0 + 4.0, y + 21.0, Face::SansSemi, FS, TEXT, H::L, V::Base);
+                g.text(&right, r.r() - 12.0, y + 21.0, Face::Sans, FS, TEXT2, H::Rt, V::Base);
+                for (k, row) in name_rows.iter().enumerate() {
+                    g.text(row, x0 + 4.0, y + 21.0 + 18.0 * k as f32, Face::SansSemi, FS, TEXT, H::L, V::Base);
+                }
+                let y = y + extra;
                 // whole items only: the facts that fit, most useful first
                 let m = fit_items(g, &meta, Face::Sans, FS, w - 8.0);
                 g.text(&m, x0 + 4.0, y + 39.0, Face::Sans, FS, TEXT2, H::L, V::Base);
                 if let Some((t, c)) = &third {
-                    let t = g.fit(t, Face::Sans, FS, w - 8.0);
-                    g.text(&t, x0 + 4.0, y + 57.0, Face::Sans, FS, *c, H::L, V::Base);
+                    for (k, row) in wrap_g(g, t, Face::Sans, FS, w - 8.0, 2).iter().enumerate() {
+                        g.text(row, x0 + 4.0, y + 57.0 + 18.0 * k as f32, Face::Sans, FS, *c, H::L, V::Base);
+                    }
                 }
             });
             y += row_h + 8.0;
         }
+        let n = shown;
         if jobs.len() > n {
             y = para(g, &format!("{} older jobs in history\\jobs.jsonl", jobs.len() - n), x0, y, w, Face::Sans, FS, LH, TEXT2);
             y += 8.0;
@@ -760,13 +854,24 @@ impl App {
     }
 }
 
-/// Text colour and accent for a severity: neutral note, amber warning, red critical.
-pub(super) fn sev_colours(s: Severity) -> (Rgb, Rgb) {
+/// The one colour mapping for a status: (text, accent). All fine keeps white text with a green
+/// dot or accent; worth a look is amber; act now is red. The words always go with the colour.
+pub(super) fn status_colours(s: Status) -> (Rgb, Rgb) {
     match s {
-        Severity::Note => (TEXT, NEUTRAL),
-        Severity::Warning => (T_AMBER, AMBER),
-        Severity::Critical => (T_RED, RED),
+        Status::Fine => (TEXT, GREEN),
+        Status::Look => (T_AMBER, AMBER),
+        Status::Act => (T_RED, RED),
     }
+}
+
+/// The status as a coloured dot and its words ("ALL FINE"); returns the y under it.
+pub(super) fn status_tag(g: &mut G, st: Status, x0: f32, y: f32) -> f32 {
+    let ac = status_colours(st).1;
+    g.stat(|g| {
+        g.dot(x0 + 4.0, y + 7.0, 4.0, ac, 1.0);
+        g.cap(&st.word().to_uppercase(), x0 + 16.0, y + 10.5, FS_CAP, H::L, V::Base);
+    });
+    y + 18.0
 }
 
 /// All rows of a wrapped text: never cut.

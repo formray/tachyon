@@ -100,6 +100,8 @@ pub struct Engine {
     link: crate::pcie::LinkTracker,
     gpu: Option<u32>,
     marks: Option<crate::markers::MarkerTracker>,
+    /// Recent marked jobs (start, end): an automatic job doing the same work is not recorded.
+    marked_spans: Vec<(i64, i64)>,
     vlog: crate::procvram::VramLog,
     // Held open while running so a second Tachyon does not share the recorder files.
     _lock: Option<std::fs::File>,
@@ -148,6 +150,7 @@ impl Engine {
             link: Default::default(),
             gpu: None,
             marks: None,
+            marked_spans: vec![],
             vlog: Default::default(),
             _lock: None,
         };
@@ -189,6 +192,8 @@ impl Engine {
             }
         }
         e.marks = Some(crate::markers::MarkerTracker::open(&dir, now_ms));
+        e.marked_spans =
+            e.history_dir().map(|d| crate::markers::reports(&d, 20).iter().map(|r| (r.start_ms, r.end_ms)).collect()).unwrap_or_default();
         out.report = crate::report::load(&bb).map(std::sync::Arc::new);
         out.report_new = out.report.as_ref().is_some_and(|r| !r.announced);
         e
@@ -350,6 +355,10 @@ impl Engine {
                 if let Some(d) = self.history_dir() {
                     let _ = crate::markers::save_report(&d, &r);
                 }
+                self.marked_spans.push((r.start_ms, r.end_ms));
+                if self.marked_spans.len() > 20 {
+                    self.marked_spans.remove(0);
+                }
                 out.marked_last = Some(r);
                 out.marked_done += 1;
             }
@@ -362,9 +371,11 @@ impl Engine {
             let kind = out.bottleneck.as_ref().map(|v| v.kind);
             let hints = if render.is_some() { self.hints.clone() } else { None };
             if let Some(job) = self.jobs.push_with(&s, render, kind, hints.as_ref()) {
-                self.finish_job(job, out);
+                self.finish_job(job, now_ms, out);
             }
-            out.live_job = self.jobs.live();
+            // while a marked job runs, the same work is not shown again as an automatic job
+            let open = self.marks.as_ref().map(|m| m.open_spans(now_ms)).unwrap_or_default();
+            out.live_job = self.jobs.live().filter(|l| !crate::markers::duplicates_marked(l.start_ms, now_ms, &open));
         } else {
             out.live_job = None;
         }
@@ -380,7 +391,13 @@ impl Engine {
         out.latest = Some(s);
     }
 
-    fn finish_job(&mut self, job: JobRecord, out: &mut Insights) {
+    fn finish_job(&mut self, job: JobRecord, now_ms: i64, out: &mut Insights) {
+        // the same work as a marked job (finished or still open): the marked job wins
+        let mut spans = self.marked_spans.clone();
+        spans.extend(self.marks.as_ref().map(|m| m.open_spans(now_ms)).unwrap_or_default());
+        if crate::markers::duplicates_marked(job.start_ms, job.end_ms, &spans) {
+            return;
+        }
         let job = match self.history_dir() {
             Some(d) => crate::history::record(&d, job.clone()).unwrap_or(job),
             None => job,
@@ -455,7 +472,7 @@ impl Engine {
         if self.history
             && let Some(job) = self.jobs.end()
         {
-            self.finish_job(job, out);
+            self.finish_job(job, now_ms, out);
         }
         if let Some(r) = self.recorder.as_mut() {
             r.close(now_ms);
@@ -540,6 +557,38 @@ mod tests {
         let live = LiveVram { total_mb: Some(16303.0), used_mb: Some(1500.0), ..Default::default() };
         let p = e.preflight_for(&Query { name: "demo4k".into(), resolution: Some("1080p".into()), ..Default::default() }, &live);
         assert_eq!((p.fit, p.matches), (crate::preflight::Fit::Unknown, 0), "other resolution: {p:#?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The 26 Oct heavy demo: python.exe ran inside a marked job. Only the marked job is kept;
+    /// no automatic "python.exe" session is shown while it runs or recorded after.
+    #[test]
+    fn marked_job_wins_over_the_automatic_session() {
+        let dir = std::env::temp_dir().join(format!("tachyon_engine_mk_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cfg = Config::default();
+        let t0 = crate::telemetry::now_ms() - 3_600_000;
+        let mut out = Insights::default();
+        let mut e = Engine::new(&cfg, Some(dir.clone()), t0, &mut out);
+        crate::markers::write_mark(&dir, "start", "demo 1.2 heavy", t0 + 1000).unwrap();
+        let mut t = t0;
+        for i in 0..300 {
+            t += 1000;
+            e.tick(Some(&gpu(99, 11000.0)), None, None, t, &mut out);
+            if i > 120 {
+                assert!(out.live_job.is_none(), "no automatic job beside the marked one: {:?}", out.live_job);
+                assert_eq!(out.marked_open.len(), 1);
+            }
+        }
+        crate::markers::write_mark(&dir, "end", "demo 1.2 heavy", t).unwrap();
+        for _ in 0..120 {
+            t += 1000;
+            e.tick(Some(&gpu(2, 1300.0)), None, None, t, &mut out);
+        }
+        assert_eq!(out.marked_done, 1);
+        assert_eq!(out.jobs_done, 0, "the python session is the same work");
+        assert!(crate::history::recent(&dir.join("history"), 10).is_empty());
+        assert_eq!(crate::markers::reports(&dir.join("history"), 10).len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

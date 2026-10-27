@@ -293,11 +293,11 @@ pub fn throttle_words(mask: u64) -> Vec<&'static str> {
     const R: [(u64, &str); 9] = [
         (0x1, "idle"),
         (0x2, "app clock limit"),
-        (0x4, "power cap"),
+        (0x4, "power limit"),
         (0x8, "hardware slowdown"),
         (0x10, "sync boost"),
-        (0x20, "thermal (driver)"),
-        (0x40, "thermal (hardware)"),
+        (0x20, "heat (driver)"),
+        (0x40, "heat (hardware)"),
         (0x80, "power brake"),
         (0x100, "display clock"),
     ];
@@ -849,8 +849,8 @@ mod tests {
     fn throttle_reason_words() {
         assert!(throttle_words(0).is_empty());
         assert_eq!(throttle_words(0x1), vec!["idle"]);
-        assert_eq!(throttle_words(0x4 | 0x20), vec!["power cap", "thermal (driver)"]);
-        assert_eq!(throttle_words(0x40 | 0x80), vec!["thermal (hardware)", "power brake"]);
+        assert_eq!(throttle_words(0x4 | 0x20), vec!["power limit", "heat (driver)"]);
+        assert_eq!(throttle_words(0x40 | 0x80), vec!["heat (hardware)", "power brake"]);
     }
     #[test]
     fn process_names_never_show_paths() {

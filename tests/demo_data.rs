@@ -126,8 +126,8 @@ fn write_demo_data() {
     let base = end - 2 * day;
     for j in [
         job("02x 169 try 1", JobKind::Render, base, 21.0, 94.0, 118.0, 1.0, "GPU-bound (91%)"),
-        job("python.exe", JobKind::Gpu, base + 3 * 3_600_000, 47.0, 88.0, 236.0, 9.0, "GPU-bound at power cap (64%)"),
-        job("02x 169 try 2", JobKind::Render, base + day, 24.0, 95.0, 139.0, 6.0, "GPU-bound at power cap (58%)"),
+        job("python.exe", JobKind::Gpu, base + 3 * 3_600_000, 47.0, 88.0, 236.0, 9.0, "GPU-bound at the power limit (64%)"),
+        job("02x 169 try 2", JobKind::Render, base + day, 24.0, 95.0, 139.0, 6.0, "GPU-bound at the power limit (58%)"),
     ] {
         history::record(&h, j).unwrap();
     }

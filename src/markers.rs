@@ -184,7 +184,10 @@ impl JobReport {
         let mut parts = vec![format!("Ran {} with {busy}", crate::history::fmt_duration(self.duration_s))];
         if self.thermal_limited_s >= 10.0 {
             tone = Tone::Warning;
-            parts.push(format!("it slowed down from heat for {:.0} s: check the cooling", self.thermal_limited_s));
+            parts.push(format!(
+                "it slowed down from heat {} of the time: check the cooling",
+                share(self.thermal_limited_s, self.duration_s)
+            ));
         }
         let full = self.vram_peak_mb.zip(self.vram_total_mb).is_some_and(|(p, t)| t > 0.0 && p / t >= 0.95);
         if full {
@@ -201,8 +204,8 @@ impl JobReport {
         if tone == Tone::Note {
             if self.power_limited_s >= 10.0 {
                 s.push_str(&format!(
-                    " The power cap held the clocks for {:.0} s, which is normal under heavy load. Nothing to fix.",
-                    self.power_limited_s
+                    " It was at the power limit {} of the time, which is normal under full load. Nothing to fix.",
+                    self.power_limit_share()
                 ));
             } else {
                 s.push_str(" Nothing held it back. Nothing to fix.");
@@ -217,14 +220,206 @@ impl JobReport {
         let s = |k: &str| p[k].as_str().map(str::to_string);
         match (s("lowest_seen"), s("best_possible")) {
             (Some(low), Some(best)) if low == best && p["degraded_events"].as_u64().unwrap_or(0) == 0 => {
-                format!("{best} for the whole job, the best this slot allows.")
+                format!("{} for the whole job: the fastest this slot allows.", link_gloss(&best))
             }
-            (Some(low), Some(best)) => {
-                format!("Between {low} and {best} (best possible); {} slowdowns under load.", p["degraded_events"].as_u64().unwrap_or(0))
-            }
+            (Some(low), Some(best)) => format!(
+                "Between {low} and {} (the best possible); {} slowdowns under load.",
+                link_gloss(&best),
+                p["degraded_events"].as_u64().unwrap_or(0)
+            ),
             _ => "Not reported by this GPU or driver.".into(),
         }
     }
+
+    /// Time at the power limit as a share of the job: "55%".
+    pub fn power_limit_share(&self) -> String {
+        share(self.power_limited_s, self.duration_s)
+    }
+
+    /// The comparison with the previous comparable marked job in `reps` (any order).
+    pub fn compare_in(&self, reps: &[JobReport]) -> Option<Comparison> {
+        previous(reps, self).map(|p| compare(p, self))
+    }
+
+    /// As a history row (the history list shows marked jobs too, instead of the automatic
+    /// session recorded at the same time).
+    pub fn as_record(&self, vs_last: Option<String>) -> crate::history::JobRecord {
+        crate::history::JobRecord {
+            kind: crate::history::JobKind::Render,
+            name: self.job.clone(),
+            key: format!("{MARKED_KEY}{}", crate::history::job_key(crate::history::JobKind::Render, &self.job)),
+            start_ms: self.start_ms,
+            end_ms: self.end_ms,
+            duration_s: self.duration_s,
+            avg_gpu: self.gpu_util_avg,
+            peak_gpu: self.gpu_util_peak,
+            avg_fps: None,
+            energy_wh: self.energy_wh,
+            energy_source: Some("marked".into()),
+            peak_vram_mb: self.vram_peak_mb,
+            peak_temp: self.temp_peak_c,
+            power_throttled_s: self.power_limited_s,
+            thermal_throttled_s: self.thermal_limited_s,
+            bottleneck: self.bottleneck_mostly.clone(),
+            cost: None,
+            currency: None,
+            vs_last,
+            profile: Default::default(),
+        }
+    }
+}
+
+/// History keys of marked jobs start with this.
+pub const MARKED_KEY: &str = "marked:";
+
+/// `part` seconds of `whole` as a rounded share: "55%", "<1%".
+pub fn share(part: f64, whole: f64) -> String {
+    if whole <= 0.0 {
+        return "—".into();
+    }
+    let p = (part / whole * 100.0).clamp(0.0, 100.0);
+    if p > 0.0 && p < 1.0 { "<1%".into() } else { format!("{p:.0}%") }
+}
+
+/// A PCIe link with a short plain gloss: "Gen5 x16" -> "Gen5 x16 (PCIe 5.0, 16 lanes)".
+pub fn link_gloss(link: &str) -> String {
+    let mut it = link.split_whitespace();
+    match (it.next().and_then(|g| g.strip_prefix("Gen")), it.next().and_then(|w| w.strip_prefix('x'))) {
+        (Some(g), Some(w)) if g.parse::<u8>().is_ok() && w.parse::<u8>().is_ok() => format!("{link} (PCIe {g}.0, {w} lanes)"),
+        _ => link.to_string(),
+    }
+}
+
+/// A clock-limit reason in plain words, with what it means for the user.
+pub fn reason_gloss(r: &str) -> String {
+    let base = r.split(" (").next().unwrap_or(r);
+    match base {
+        "power limit" => "Power limit: the card kept its clocks inside its power budget. Normal under full load.".into(),
+        "reliability policy" => "Reliability policy: the driver kept the voltage in a safe range. Normal, seen at idle too.".into(),
+        "idle" => "Idle: nothing to do, so the clocks dropped. Normal.".into(),
+        "temperature limit" => "Heat: the card slowed down to stay cool. Check the airflow and fans.".into(),
+        "hardware slowdown" => {
+            "Hardware slowdown: the board asked for lower clocks (heat or power). Check the cooling and power cables.".into()
+        }
+        "power brake" => "Power brake: the power supply or board asked for less power. Check the power cables.".into(),
+        "sync boost" => "Sync boost: clocks matched to another GPU. Normal with several GPUs.".into(),
+        _ => {
+            let mut s = r.to_string();
+            if let Some(c) = s.get_mut(..1) {
+                c.make_ascii_uppercase();
+            }
+            s
+        }
+    }
+}
+
+/// The previous comparable marked job: the latest earlier run with the same name (run counters
+/// ignored), otherwise the latest earlier marked job.
+pub fn previous<'a>(reps: &'a [JobReport], cur: &JobReport) -> Option<&'a JobReport> {
+    let key = |j: &JobReport| crate::history::job_key(crate::history::JobKind::Render, &j.job);
+    let earlier = || reps.iter().filter(|r| r.end_ms <= cur.start_ms + 1000 && r.start_ms < cur.start_ms);
+    earlier().filter(|r| key(r) == key(cur)).max_by_key(|r| r.end_ms).or_else(|| earlier().max_by_key(|r| r.end_ms))
+}
+
+/// A job against the previous comparable one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Comparison {
+    pub prev_job: String,
+    pub prev_start_ms: i64,
+    /// The same job run again (speed is comparable); otherwise a different job.
+    pub same_job: bool,
+    /// "4% faster than last time", "VRAM peak +1.2 GB", ...
+    pub parts: Vec<String>,
+}
+
+impl Comparison {
+    /// One sentence with its capital and full stop.
+    pub fn sentence(&self) -> String {
+        let mut s = self.parts.join(", ");
+        if let Some(c) = s.get_mut(..1) {
+            c.make_ascii_uppercase();
+        }
+        s.push('.');
+        s
+    }
+}
+
+/// When there is nothing earlier to compare with.
+pub const FIRST_RUN: &str = "First run, nothing to compare.";
+
+/// Duration, average GPU, VRAM peak, average power and energy against `prev`.
+pub fn compare(prev: &JobReport, cur: &JobReport) -> Comparison {
+    let same_job = crate::history::job_key(crate::history::JobKind::Render, &prev.job)
+        == crate::history::job_key(crate::history::JobKind::Render, &cur.job);
+    let mut parts = vec![];
+    let (a, b) = (prev.duration_s.max(1.0), cur.duration_s.max(1.0));
+    let ch = (b / a - 1.0) * 100.0;
+    parts.push(if ch.abs() < 3.0 {
+        if same_job { "about as fast as last time".to_string() } else { "about as long".to_string() }
+    } else if same_job {
+        if ch > 0.0 { format!("{ch:.0}% slower than last time") } else { format!("{:.0}% faster than last time", -ch) }
+    } else if b / a >= 2.0 {
+        format!("ran {:.1}× as long", b / a)
+    } else if a / b >= 2.0 {
+        format!("ran {:.1}× shorter", a / b)
+    } else if ch > 0.0 {
+        format!("ran {ch:.0}% longer")
+    } else {
+        format!("ran {:.0}% shorter", -ch)
+    });
+    if let (Some(p), Some(c)) = (prev.gpu_util_avg, cur.gpu_util_avg) {
+        let d = c - p;
+        parts.push(if d.abs() < 2.0 { format!("same GPU load ({c:.0}%)") } else { format!("GPU {d:+.0} points ({c:.0}% vs {p:.0}%)") });
+    }
+    if let (Some(p), Some(c)) = (prev.vram_peak_mb, cur.vram_peak_mb) {
+        let d = c - p;
+        parts.push(if d.abs() < 64.0 {
+            "same VRAM peak".to_string()
+        } else if d.abs() >= 1024.0 {
+            format!("VRAM {:+.1} GB", d / 1024.0)
+        } else {
+            format!("VRAM {d:+.0} MB")
+        });
+    }
+    if let (Some(p), Some(c)) = (prev.power_avg_w, cur.power_avg_w) {
+        let d = c - p;
+        parts.push(if d.abs() < 5.0 { "same average power".to_string() } else { format!("power {d:+.0} W on average") });
+    }
+    if let (Some(p), Some(c)) = (prev.energy_wh, cur.energy_wh) {
+        let d = c - p;
+        parts.push(if d.abs() < 0.1 { "same energy".to_string() } else { format!("energy {d:+.1} Wh") });
+    }
+    Comparison { prev_job: prev.job.clone(), prev_start_ms: prev.start_ms, same_job, parts }
+}
+
+/// Two time spans overlap by at least half of the shorter one.
+pub fn overlaps(a: (i64, i64), b: (i64, i64)) -> bool {
+    let ov = a.1.min(b.1) - a.0.max(b.0);
+    let shorter = (a.1 - a.0).min(b.1 - b.0).max(1);
+    ov > 0 && ov * 2 >= shorter
+}
+
+/// An automatic job (render log or GPU-busy session) that is the same work as a marked job: the
+/// marked job wins and the automatic one is not listed again.
+pub fn duplicates_marked(start_ms: i64, end_ms: i64, marked: &[(i64, i64)]) -> bool {
+    marked.iter().any(|m| overlaps((start_ms, end_ms), *m))
+}
+
+/// The history list with the marked jobs in it: automatic jobs that duplicate a marked job are
+/// dropped, the marked ones added (with their comparison), oldest first.
+pub fn merge_history(auto: Vec<crate::history::JobRecord>, marked: &[JobReport]) -> Vec<crate::history::JobRecord> {
+    let spans: Vec<(i64, i64)> = marked.iter().map(|m| (m.start_ms, m.end_ms)).collect();
+    let mut v: Vec<crate::history::JobRecord> = auto.into_iter().filter(|j| !duplicates_marked(j.start_ms, j.end_ms, &spans)).collect();
+    for m in marked {
+        let vs = match m.compare_in(marked) {
+            Some(c) if c.same_job => c.sentence(),
+            Some(c) => format!("Vs \"{}\": {}", c.prev_job, c.sentence()),
+            None => FIRST_RUN.to_string(),
+        };
+        v.push(m.as_record(Some(vs)));
+    }
+    v.sort_by_key(|j| j.end_ms);
+    v
 }
 
 #[derive(Debug, Clone, Default)]
@@ -424,7 +619,11 @@ impl Acc {
         }
         let mut sentence = parts.join(", ") + ".";
         if power_s + thermal_s >= 1.0 {
-            sentence.push_str(&format!(" Clock-limited by power for {power_s:.0} s and by heat for {thermal_s:.0} s."));
+            sentence.push_str(&format!(
+                " At the power limit {} of the time, slowed by heat {} of the time.",
+                share(power_s, duration_s),
+                share(thermal_s, duration_s)
+            ));
         }
         if degraded > 0 {
             sentence.push_str(&format!(" The PCIe link degraded {degraded} time(s) during the job."));
@@ -594,6 +793,11 @@ impl MarkerTracker {
         }
     }
 
+    /// The open jobs as (start, now) spans.
+    pub fn open_spans(&self, now: i64) -> Vec<(i64, i64)> {
+        self.open.iter().map(|a| (a.start_ms, now.max(a.start_ms))).collect()
+    }
+
     pub fn open_jobs(&self, now: i64) -> Vec<OpenJob> {
         self.open
             .iter()
@@ -736,8 +940,8 @@ mod tests {
         let (v, tone) = heavy.verdict();
         assert_eq!(tone, Tone::Note, "{v}");
         assert!(v.starts_with("Ran 5 min") && v.contains("almost fully busy (99% on average)"), "{v}");
-        assert!(v.contains("The power cap held the clocks for 169 s, which is normal"), "{v}");
-        assert_eq!(heavy.pcie_sentence(), "Gen5 x16 for the whole job, the best this slot allows.");
+        assert!(v.contains("at the power limit 55% of the time, which is normal under full load"), "{v}");
+        assert_eq!(heavy.pcie_sentence(), "Gen5 x16 (PCIe 5.0, 16 lanes) for the whole job: the fastest this slot allows.");
         let light = reps.iter().find(|r| r.job == "demo 1.2").expect("light job");
         let (v, tone) = light.verdict();
         assert_eq!(tone, Tone::Note);
@@ -747,6 +951,88 @@ mod tests {
         hot.thermal_limited_s = 42.0;
         let (v, tone) = hot.verdict();
         assert_eq!(tone, Tone::Warning);
-        assert!(v.contains("slowed down from heat for 42 s: check the cooling") && !v.contains("Nothing to fix"), "{v}");
+        assert!(v.contains("slowed down from heat 14% of the time: check the cooling") && !v.contains("Nothing to fix"), "{v}");
+    }
+
+    fn demo_reports() -> Vec<JobReport> {
+        include_str!("../tests/samples/marked_jobs_2026-10-26.jsonl").lines().filter_map(|l| serde_json::from_str(l).ok()).collect()
+    }
+
+    /// "demo 1.2 heavy" has no earlier run of its own: it is compared with the last marked job,
+    /// "demo 1.2"; that one is the first run.
+    #[test]
+    fn job_compared_with_the_previous_comparable_one() {
+        let reps = demo_reports();
+        let heavy = reps.iter().find(|r| r.job == "demo 1.2 heavy").unwrap();
+        let light = reps.iter().find(|r| r.job == "demo 1.2").unwrap();
+        assert!(light.compare_in(&reps).is_none(), "first run");
+        let c = heavy.compare_in(&reps).unwrap();
+        assert_eq!((c.prev_job.as_str(), c.same_job), ("demo 1.2", false));
+        assert_eq!(
+            c.sentence(),
+            "Ran 2.6× as long, GPU +17 points (99% vs 82%), VRAM +8.7 GB, power +57 W on average, energy +18.1 Wh.",
+            "{c:?}"
+        );
+        // the same job again matches by name, before any newer other job; speed is comparable
+        let mut again = heavy.clone();
+        again.job = "demo 1.2 heavy try 2".into();
+        again.start_ms = heavy.end_ms + 600_000;
+        again.end_ms = again.start_ms + 295_000;
+        again.duration_s = 295.0;
+        again.vram_peak_mb = heavy.vram_peak_mb.map(|v| v + 1228.8);
+        let mut other = light.clone();
+        other.start_ms = heavy.end_ms + 60_000;
+        other.end_ms = other.start_ms + 119_000;
+        let all = vec![light.clone(), heavy.clone(), other, again.clone()];
+        let c = again.compare_in(&all).unwrap();
+        assert!(c.same_job);
+        assert_eq!(c.prev_start_ms, heavy.start_ms);
+        assert!(c.sentence().starts_with("4% faster than last time, same GPU load (99%), VRAM +1.2 GB"), "{}", c.sentence());
+    }
+
+    #[test]
+    fn plain_words_for_links_reasons_and_shares() {
+        assert_eq!(link_gloss("Gen5 x16"), "Gen5 x16 (PCIe 5.0, 16 lanes)");
+        assert_eq!(link_gloss("unknown"), "unknown");
+        assert!(reason_gloss("power limit").contains("Normal under full load"));
+        assert!(
+            reason_gloss("reliability policy (the driver holding the clocks in a safe range, seen at idle too)")
+                .starts_with("Reliability policy:")
+        );
+        assert!(reason_gloss("temperature limit (driver)").contains("airflow"));
+        assert_eq!(share(168.7, 307.0), "55%");
+        assert_eq!(share(0.2, 307.0), "<1%");
+        assert_eq!(share(0.0, 307.0), "0%");
+    }
+
+    /// The automatic "python.exe" sessions recorded during both demo jobs are the same work: the
+    /// marked jobs win; the render-log jobs from earlier stay.
+    #[test]
+    fn marked_jobs_replace_their_automatic_duplicates() {
+        let reps = demo_reports();
+        let auto: Vec<crate::history::JobRecord> =
+            include_str!("../tests/samples/history_jobs_2026-10-26.jsonl").lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+        assert_eq!(auto.iter().filter(|j| j.name == "python.exe").count(), 2);
+        let spans: Vec<(i64, i64)> = reps.iter().map(|m| (m.start_ms, m.end_ms)).collect();
+        for j in auto.iter().filter(|j| j.name == "python.exe") {
+            assert!(duplicates_marked(j.start_ms, j.end_ms, &spans), "{}", j.start_ms);
+        }
+        let merged = merge_history(auto.clone(), &reps);
+        let names: Vec<&str> = merged.iter().map(|j| j.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "tachyon_v1_test_2026-10-26 · gpu_test_render",
+                "tachyon_v1_test_2026-10-26 · gpu_test_render try 2",
+                "demo 1.2",
+                "demo 1.2 heavy"
+            ]
+        );
+        assert!(merged[3].key.starts_with(MARKED_KEY));
+        assert_eq!(merged[2].vs_last.as_deref(), Some(FIRST_RUN));
+        assert!(merged[3].vs_last.as_deref().unwrap().starts_with("Vs \"demo 1.2\": Ran 2.6× as long"), "{:?}", merged[3].vs_last);
+        // a short overlap at the edge is not a duplicate
+        assert!(!overlaps((0, 100_000), (90_000, 400_000)));
+        assert!(overlaps((0, 100_000), (40_000, 400_000)));
     }
 }

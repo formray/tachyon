@@ -736,7 +736,7 @@ pub fn tools() -> Value {
         tool(
             "get_process_vram",
             "VRAM per process over time",
-            "Which processes held the most video memory over a time range: peak, time-weighted average and last value per process (several processes with the same name count together), when each was first and last seen, and a short timeline for the top ones. Also the reading now. Recorded every few seconds while Tachyon runs (on Windows from the same per-process counters Task Manager uses).",
+            "Which processes held the most video memory over a time range: peak, time-weighted average over the time the process was running (running_s) and last value per process (several processes with the same name count together), when each was first and last seen, and a short timeline for the top ones. Also the reading now. Recorded every few seconds while Tachyon runs (on Windows from the same per-process counters Task Manager uses).",
             json!({
                 "minutes": { "type": "number", "description": "Window length in minutes up to now or `until` (1-10080, default 60).", "minimum": 1, "maximum": 10080 },
                 "since": { "type": "string", "description": "Optional start: local date and time (2026-10-26 18:00), or Unix ms." },
@@ -1056,7 +1056,26 @@ fn job_reports(args: &Value, src: &mut dyn Source, now: i64) -> Result<Value, St
                 .collect::<Vec<_>>()
         )
     };
-    let mut v = json!({ "reports": r, "count": r.len(), "open": open, "source": s["source"] });
+    // each with the comparison against the previous comparable marked job
+    let reps: Vec<Value> = r
+        .iter()
+        .map(|j| {
+            let mut x = json!(j);
+            match j.compare_in(&all) {
+                Some(c) => {
+                    x["compared_with"] = json!({
+                        "job": c.prev_job,
+                        "started": local_text(c.prev_start_ms, "%Y-%m-%d %H:%M:%S"),
+                        "same_job": c.same_job,
+                    });
+                    x["vs_previous"] = json!(c.sentence());
+                }
+                None => x["vs_previous"] = json!(crate::markers::FIRST_RUN),
+            }
+            x
+        })
+        .collect();
+    let mut v = json!({ "reports": reps, "count": r.len(), "open": open, "source": s["source"] });
     if !running {
         v["note"] = json!("Tachyon is not running: markers are written but only a running Tachyon measures the jobs.");
     } else if r.is_empty() {
@@ -1286,7 +1305,13 @@ impl Source for Live {
     }
 
     fn history(&mut self, n: usize) -> Vec<JobRecord> {
-        self.dir.as_ref().map(|d| history::recent(&d.join("history"), n)).unwrap_or_default()
+        let Some(d) = self.dir.as_ref().map(|d| d.join("history")) else { return vec![] };
+        // an automatic job that is the same work as a marked job is not listed twice
+        let spans: Vec<(i64, i64)> = crate::markers::reports(&d, 200).iter().map(|r| (r.start_ms, r.end_ms)).collect();
+        let mut v = history::recent(&d, n + spans.len());
+        v.retain(|j| !crate::markers::duplicates_marked(j.start_ms, j.end_ms, &spans));
+        let skip = v.len().saturating_sub(n);
+        v.split_off(skip)
     }
 
     fn data_dir(&self) -> Option<PathBuf> {

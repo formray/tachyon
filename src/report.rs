@@ -409,16 +409,36 @@ impl Report {
                 Some(_) => format!("Tachyon stopped at {at} after a GPU or hardware error. Your PC kept running; see the top cause below."),
             },
             Cause::Restart => match top {
-                Some(c) => format!(
+                Some(c) if self.diagnosis.as_ref().is_some_and(|d| d.competing()) => format!(
                     "Your PC restarted unexpectedly at {at}. It is running again now; the most likely cause is {} (about {}%).",
                     c.suspect.short(),
                     c.percent
+                ),
+                Some(c) => format!(
+                    "Your PC restarted unexpectedly at {at}. It is running again now; the cause is {} {}.",
+                    match crate::diagnose::certainty_word(c.percent) {
+                        "certain" => "almost certainly",
+                        "likely" => "most likely",
+                        _ => "possibly",
+                    },
+                    c.suspect.short()
                 ),
                 None => {
                     format!("Your PC restarted unexpectedly at {at}. It is running again now; there was not enough evidence for a cause.")
                 }
             },
         }
+    }
+
+    /// The action line of the top-cause card, or none when the verdict already says it (a plain
+    /// close: "nothing to do" once, in the verdict).
+    pub fn card_action(&self) -> Option<String> {
+        let c = self.diagnosis.as_ref()?.top()?;
+        let nothing = c.advice.to_lowercase().starts_with("nothing to do");
+        if nothing && self.verdict().to_lowercase().contains("nothing to do") {
+            return None;
+        }
+        Some(if nothing { c.advice.clone() } else { format!("What to do: {}", c.advice) })
     }
 
     /// What Hex says, once.
@@ -768,6 +788,35 @@ mod tests {
         let mut again = r.clone();
         again.revise();
         assert_eq!(again, r, "revise is idempotent");
+        // one cause, near certain: a word, not "85%"; "nothing to do" said once (in the verdict)
+        assert!(!d.competing());
+        assert_eq!(d.share(&d.causes[0]), "certain");
+        assert_eq!(r.card_action(), None, "the verdict already says nothing to do");
+        assert_eq!(r.verdict().to_lowercase().matches("nothing to do").count(), 1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Competing causes of a restart keep their percentages; a lone cause is said in words.
+    #[test]
+    fn restart_verdict_uses_percent_only_when_causes_compete() {
+        use crate::diagnose::{Diagnosis, Ranked, Suspect};
+        let rk =
+            |s: Suspect, p: u8| Ranked { suspect: s, label: s.label().into(), percent: p, evidence: vec![], advice: "Check it.".into() };
+        let mut r: Report = serde_json::from_str(include_str!("../tests/samples/report_2138_v12draft.json")).unwrap();
+        r.cause = Cause::Restart;
+        r.diagnosis = Some(Diagnosis {
+            causes: vec![rk(Suspect::Ram, 45), rk(Suspect::Power, 30)],
+            confidence: "likely".into(),
+            sentence: String::new(),
+            normal: vec![],
+            note: String::new(),
+            hints: vec![],
+        });
+        assert!(r.verdict().contains("(about 45%)"), "{}", r.verdict());
+        assert_eq!(r.card_action().as_deref(), Some("What to do: Check it."));
+        let d = r.diagnosis.as_mut().unwrap();
+        d.causes = vec![rk(Suspect::Ram, 60), rk(Suspect::Power, 10)];
+        assert!(!r.verdict().contains('%'), "{}", r.verdict());
+        assert!(r.verdict().contains("most likely"), "{}", r.verdict());
     }
 }

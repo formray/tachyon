@@ -10,6 +10,8 @@ pub const VIOLET: Rgb = (169, 139, 255);
 pub const AMBER: Rgb = (255, 176, 72);
 pub const RED: Rgb = (255, 86, 106);
 pub const NEUTRAL: Rgb = (150, 170, 200);
+/// "All fine" (status dot and accent only; the text stays white).
+pub const GREEN: Rgb = (96, 222, 150);
 
 // text
 pub const TEXT: Rgb = (248, 250, 253);
@@ -21,6 +23,7 @@ pub const T_AMBER: Rgb = (255, 216, 150);
 pub const T_RED: Rgb = (255, 190, 198);
 pub const T_VIOLET: Rgb = (220, 210, 255);
 pub const T_NEUTRAL: Rgb = (200, 214, 236);
+pub const T_GREEN: Rgb = (190, 246, 214);
 /// 1 px soft text shadow (alpha).
 pub const TEXT_SHADOW_A: f32 = 0.42;
 
@@ -95,7 +98,7 @@ pub fn field_extremes() -> Vec<Rgb> {
     v
 }
 
-pub const TEXT_COLOURS: [(&str, Rgb); 7] = [
+pub const TEXT_COLOURS: [(&str, Rgb); 8] = [
     ("TEXT", TEXT),
     ("TEXT2", TEXT2),
     ("T_CYAN", T_CYAN),
@@ -103,6 +106,7 @@ pub const TEXT_COLOURS: [(&str, Rgb); 7] = [
     ("T_RED", T_RED),
     ("T_VIOLET", T_VIOLET),
     ("T_NEUTRAL", T_NEUTRAL),
+    ("T_GREEN", T_GREEN),
 ];
 
 #[cfg(test)]

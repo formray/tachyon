@@ -139,15 +139,48 @@ impl Diagnosis {
     pub fn top(&self) -> Option<&Ranked> {
         self.causes.first()
     }
+    /// Percentages are shown only when two or more causes compete (the second has at least
+    /// `COMPETING_PCT`); a single or near-certain cause is said in words instead.
+    pub fn competing(&self) -> bool {
+        self.causes.len() >= 2 && self.causes[1].percent >= COMPETING_PCT && self.causes[0].percent < CERTAIN_PCT
+    }
+
+    /// How a cause's share reads: "45%" when causes compete, otherwise a word.
+    pub fn share(&self, c: &Ranked) -> String {
+        if self.competing() { format!("{}%", c.percent) } else { certainty_word(c.percent).to_string() }
+    }
+
     /// One line for Hex: "Likely cause: unstable RAM / EXPO (45%)."
     pub fn short_line(&self) -> String {
         match self.top() {
-            Some(t) => {
+            Some(t) if self.competing() => {
                 let w = if self.confidence == "likely" { "Likely" } else { "Possible" };
                 format!("{w} cause: {} ({}%).", t.suspect.short(), t.percent)
             }
+            Some(t) => {
+                let w = match certainty_word(t.percent) {
+                    "certain" => "Cause",
+                    "likely" => "Likely cause",
+                    _ => "Possible cause",
+                };
+                format!("{w}: {}.", t.suspect.short())
+            }
             None => "No clear cause in the evidence.".into(),
         }
+    }
+}
+
+/// A second cause with at least this share competes with the top one (percentages shown).
+pub const COMPETING_PCT: u8 = 20;
+/// A top cause with at least this share is said as "certain", never as a percentage.
+pub const CERTAIN_PCT: u8 = 80;
+
+/// The share of one cause in words: "certain", "likely" or "possible".
+pub fn certainty_word(percent: u8) -> &'static str {
+    match percent {
+        CERTAIN_PCT.. => "certain",
+        50.. => "likely",
+        _ => "possible",
     }
 }
 
@@ -1041,5 +1074,33 @@ mod tests {
         for c in &d.causes {
             assert!(!c.label.contains("certain") && !d.sentence.contains("certain"));
         }
+    }
+    #[test]
+    fn percentages_only_for_competing_causes() {
+        assert_eq!(
+            (certainty_word(85), certainty_word(80), certainty_word(60), certainty_word(45)),
+            ("certain", "certain", "likely", "possible")
+        );
+        let rk = |s: Suspect, p: u8| Ranked { suspect: s, label: s.label().into(), percent: p, evidence: vec![], advice: String::new() };
+        let mut d = Diagnosis {
+            causes: vec![rk(Suspect::Closed, 85)],
+            confidence: "likely".into(),
+            sentence: String::new(),
+            normal: vec![],
+            note: String::new(),
+            hints: vec![],
+        };
+        assert!(!d.competing(), "one cause");
+        assert_eq!(d.share(&d.causes[0]), "certain");
+        assert!(!d.short_line().contains('%'), "{}", d.short_line());
+        d.causes = vec![rk(Suspect::Ram, 45), rk(Suspect::Power, 30), rk(Suspect::DriverTimeout, 10)];
+        assert!(d.competing());
+        assert_eq!(d.share(&d.causes[1]), "30%");
+        assert!(d.short_line().ends_with("(45%)."), "{}", d.short_line());
+        d.causes = vec![rk(Suspect::Ram, 70), rk(Suspect::Power, 15)];
+        assert!(!d.competing(), "a weak second cause does not compete");
+        assert_eq!(d.share(&d.causes[1]), "possible");
+        d.causes = vec![rk(Suspect::Ram, 80), rk(Suspect::Power, 20)];
+        assert!(!d.competing(), "a near-certain top cause");
     }
 }
