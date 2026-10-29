@@ -260,10 +260,13 @@ mod tests {
     #[test]
     fn decodes_the_embedded_atlas() {
         // sizes and pixel sums computed with PIL for the same files
-        let cases: [(&[u8], usize, usize, u64); 3] = [
-            (include_bytes!("../res/hex/hex_atlas_1x.png"), 503, 296, 8_670_343),
-            (include_bytes!("../res/hex/hex_atlas_1_5x.png"), 740, 448, 19_579_625),
-            (include_bytes!("../res/hex/hex_atlas_2x.png"), 1011, 587, 34_782_914),
+        let cases: [(&[u8], usize, usize, u64); 6] = [
+            (include_bytes!("../res/hex/velvet/hex_atlas_1x.png"), 511, 375, 10_416_198),
+            (include_bytes!("../res/hex/velvet/hex_atlas_1_5x.png"), 757, 562, 23_393_821),
+            (include_bytes!("../res/hex/velvet/hex_atlas_2x.png"), 999, 747, 41_562_452),
+            (include_bytes!("../res/hex/flat/hex_atlas_1x.png"), 508, 356, 10_078_770),
+            (include_bytes!("../res/hex/flat/hex_atlas_1_5x.png"), 754, 528, 22_679_836),
+            (include_bytes!("../res/hex/flat/hex_atlas_2x.png"), 983, 702, 40_303_102),
         ];
         for (png, w0, h0, sum0) in cases {
             let (w, h, px) = decode_gray8(png).unwrap();

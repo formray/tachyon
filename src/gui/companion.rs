@@ -8,8 +8,8 @@
 //! a fullscreen app is in front; resumed at frame 0 by the 1 Hz poll. The bubble redraws on the
 //! poll only while it is open.
 use super::*;
-use tachyon::config::UiMode;
-use tachyon::hex::{self, Animator, Atlas, EdgeGeo, Inputs, Pose, Script, State};
+use tachyon::config::{HexSkin, UiMode};
+use tachyon::hex::{self, Animator, Atlas, EdgeGeo, Inputs, Pose, Script, Signals, State, Triggers};
 
 pub(super) const HEX_CLASS: &str = "TachyonHex";
 pub(super) const BUBBLE_CLASS: &str = "TachyonBubble";
@@ -60,8 +60,12 @@ pub(super) struct Companion {
     sc: Script,
     at: Atlas,
     key: &'static str,
+    skin: HexSkin,
     anim: Animator,
+    trig: Triggers,
     want: State,
+    /// `--hex-demo` / `--hex-state=NAME`: states are forced for a preview (no real triggers)
+    pub demo: Option<Demo>,
     pose: Pose,
     edge_geo: Option<EdgeGeo>,
     edge: Option<(u32, Vec<f32>)>,
@@ -110,6 +114,68 @@ pub(super) enum Special {
     Preflight,
 }
 
+/// Preview mode: `tachyon --hex-demo` cycles through the six states (8 s each), `--hex-state=NAME`
+/// holds one; a click on Hex goes to the next state. Inputs are made up to match each state.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Demo {
+    pub idx: usize,
+    pub cycle: bool,
+    pub since: Instant,
+}
+
+pub(super) const DEMO_ORDER: [State; 6] = [State::Idle, State::Render, State::Hot, State::Vram, State::Alarm, State::Sleepy];
+const DEMO_SECS: f32 = 8.0;
+
+impl Demo {
+    /// From the command line: `--hex-demo`, `--hex-state=hot` (or `--hex-state hot`).
+    pub fn from_args(args: &[String]) -> Option<Demo> {
+        let mut it = args.iter();
+        while let Some(a) = it.next() {
+            let a = a.to_ascii_lowercase();
+            if a == "--hex-demo" {
+                return Some(Demo { idx: 0, cycle: true, since: Instant::now() });
+            }
+            let name = if let Some(v) = a.strip_prefix("--hex-state=") {
+                Some(v.to_string())
+            } else if a == "--hex-state" {
+                it.next().map(|v| v.to_ascii_lowercase())
+            } else {
+                None
+            };
+            if let Some(n) = name {
+                let n = if n == "busy" { "render".to_string() } else { n };
+                let idx = hex::State::from_key(&n).and_then(|s| DEMO_ORDER.iter().position(|d| *d == s)).unwrap_or(0);
+                return Some(Demo { idx, cycle: false, since: Instant::now() });
+            }
+        }
+        None
+    }
+    fn state(&mut self) -> State {
+        if self.cycle && self.since.elapsed().as_secs_f32() >= DEMO_SECS {
+            self.idx = (self.idx + 1) % DEMO_ORDER.len();
+            self.since = Instant::now();
+        }
+        DEMO_ORDER[self.idx]
+    }
+    pub fn next(&mut self) {
+        self.idx = (self.idx + 1) % DEMO_ORDER.len();
+        self.since = Instant::now();
+    }
+    /// Made-up readings that suit the state (like the design previews).
+    fn inputs(&self, st: State, temp_red: f32) -> Inputs {
+        let t = self.since.elapsed().as_secs_f32();
+        let (load, temp, vram) = match st {
+            State::Idle => (25.0, 55.0, 0.4),
+            State::Render => (98.0, 72.0, 0.6),
+            State::Hot => (98.0, 81.0, 0.6),
+            State::Vram => (90.0, 70.0, 0.95),
+            State::Alarm => (0.0, 60.0, 0.5),
+            State::Sleepy => (1.0, 40.0, 0.2),
+        };
+        Inputs { load, temp, temp_red, progress: (t / DEMO_SECS).fract().max(0.02), vram }
+    }
+}
+
 /// True when a fullscreen app (game, video, presentation) is in front on the sprite's monitor.
 pub(super) unsafe fn fullscreen_in_front(near: HWND) -> bool {
     let fg = GetForegroundWindow();
@@ -142,6 +208,20 @@ fn present_alpha(hwnd: HWND, s: &Surface, x: i32, y: i32, alpha: u8) {
     }
 }
 
+fn vram_frac(snap: &Snapshot) -> Option<f32> {
+    let g = snap.sample.as_ref()?;
+    match (g.vram_used_mb, g.vram_total_mb) {
+        (Some(u), Some(t)) if t > 0.0 => Some((u / t) as f32),
+        _ => None,
+    }
+}
+
+/// What the triggers read: `crash` = an unannounced crash report (read before Hex announces it).
+fn signals(snap: &Snapshot, crash: bool) -> Signals {
+    let (load, temp) = load_temp(snap);
+    Signals { render: snap.render.is_some(), load, temp, vram: vram_frac(snap), gpu_error: snap.gpu_lost, crash }
+}
+
 fn inputs(snap: &Snapshot, cfg: &Config) -> (Inputs, bool) {
     let (load, temp) = load_temp(snap);
     let progress = snap
@@ -151,13 +231,15 @@ fn inputs(snap: &Snapshot, cfg: &Config) -> (Inputs, bool) {
         .and_then(|p| p.total.map(|t| p.frame as f32 / t.max(1) as f32))
         .unwrap_or(0.0)
         .clamp(0.0, 1.0);
-    (Inputs { load: load.unwrap_or(0.0), temp: temp.unwrap_or(40.0), temp_red: cfg.gpu.temp_red_c, progress }, snap.render.is_some())
+    let vram = vram_frac(snap).unwrap_or(0.0);
+    (Inputs { load: load.unwrap_or(0.0), temp: temp.unwrap_or(40.0), temp_red: cfg.gpu.temp_red_c, progress, vram }, snap.render.is_some())
 }
 
 impl Companion {
     /// Create the sprite window (hidden) for the DPI of where it will sit.
-    pub unsafe fn new(hinst: HINSTANCE, cfg: &Config, snap: &Snapshot) -> Option<Companion> {
-        let sc = Script::parse(hex::ATLAS_JSON)?;
+    pub unsafe fn new(hinst: HINSTANCE, cfg: &Config, snap: &Snapshot, demo: Option<Demo>) -> Option<Companion> {
+        let skin = cfg.hex_skin;
+        let sc = Script::parse(hex::atlas_json(skin))?;
         let hwnd = present::create(HEX_CLASS, "Tachyon Hex", WS_EX_TOPMOST | WS_EX_NOACTIVATE, hinst);
         if hwnd.is_null() {
             return None;
@@ -178,7 +260,7 @@ impl Companion {
         let _ =
             windows_sys::Win32::UI::HiDpi::GetDpiForMonitor(mon, windows_sys::Win32::UI::HiDpi::MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y);
         let key = hex::scale_key(dpi_x as f32 / 96.0);
-        let at = Atlas::load(key)?;
+        let at = Atlas::load(skin, key)?;
         let n = at.size() as i32;
         let pos = pt.unwrap_or_else(|| {
             let mut mi: MONITORINFO = std::mem::zeroed();
@@ -187,11 +269,19 @@ impl Companion {
             let w = mi.rcWork;
             POINT { x: w.right - n - 24, y: w.bottom - n - 24 }
         });
-        let (inp, render) = inputs(snap, cfg);
-        let mut anim = Animator::new(&sc, State::Idle);
-        let want = anim.desired(render, Some(inp.load), Some(inp.temp), cfg.gpu.temp_amber_c, 0);
+        let (mut inp, _) = inputs(snap, cfg);
+        let mut trig = Triggers::default();
+        let mut demo = demo;
+        let want = match demo.as_mut() {
+            Some(d) => {
+                let st = d.state();
+                inp = d.inputs(st, cfg.gpu.temp_red_c);
+                st
+            }
+            None => trig.desired(&signals(snap, snap.insights.report_new), cfg.gpu.temp_amber_c, cfg.gpu.temp_red_c, 0),
+        };
         // start directly in the right state (no transition on launch)
-        anim = Animator::new(&sc, want);
+        let mut anim = Animator::new(&sc, want);
         let pose = anim.next(&sc).0;
         Some(Companion {
             hwnd,
@@ -199,8 +289,11 @@ impl Companion {
             sc,
             at,
             key,
+            skin,
             anim,
+            trig,
             want,
+            demo,
             pose,
             edge_geo: None,
             edge: None,
@@ -233,7 +326,42 @@ impl Companion {
     }
     /// debug: state, poll redraws
     pub fn debug(&self) -> String {
-        self.anim.state.key().to_string()
+        format!("{} ({}{})", self.anim.state.key(), self.skin.as_str(), if self.demo.is_some() { ", demo" } else { "" })
+    }
+
+    /// Settings > Companion skin: swap the atlas live, keeping the state and the position.
+    pub unsafe fn set_skin(&mut self, skin: HexSkin) {
+        if skin == self.skin {
+            return;
+        }
+        let (Some(sc), Some(at)) = (Script::parse(hex::atlas_json(skin)), Atlas::load(skin, self.key)) else { return };
+        self.sc = sc;
+        self.at = at;
+        self.skin = skin;
+        self.anim = Animator::new(&self.sc, self.anim.state);
+        self.edge_geo = None;
+        self.edge = None;
+        self.pose = self.anim.next(&self.sc).0;
+        if !self.paused {
+            self.draw(None);
+        }
+    }
+
+    /// A click on Hex: in preview mode the next state, otherwise it acknowledges a crash alarm.
+    /// Returns true when the click was used up (no bubble).
+    pub unsafe fn on_click(&mut self, cfg: &Config) -> bool {
+        if let Some(d) = self.demo.as_mut() {
+            d.next();
+            let st = d.state();
+            self.inp = d.inputs(st, cfg.gpu.temp_red_c);
+            self.want = st;
+            if !self.anim.in_transition() {
+                self.on_frame(None);
+            }
+            return true;
+        }
+        self.trig.acknowledge();
+        false
     }
 
     pub unsafe fn show(&mut self) {
@@ -308,11 +436,16 @@ impl Companion {
     /// 1 Hz poll: new values. Starts transitions right away and resumes after a pause. No
     /// other redraw: the next scheduled frame (at most 2 s away, 0.5 s while rendering) picks up
     /// the new colours and the edge progress.
-    pub unsafe fn on_poll(&mut self, snap: &Snapshot, cfg: &Config, now_ms: u64, dump: Option<&std::path::Path>) {
-        let (inp, render) = inputs(snap, cfg);
-        self.inp = inp;
-        let (load, temp) = load_temp(snap);
-        self.want = self.anim.desired(render, load, temp, cfg.gpu.temp_amber_c, now_ms);
+    pub unsafe fn on_poll(&mut self, snap: &Snapshot, cfg: &Config, now_ms: u64, crash: bool, dump: Option<&std::path::Path>) {
+        if let Some(d) = self.demo.as_mut() {
+            let st = d.state();
+            self.inp = d.inputs(st, cfg.gpu.temp_red_c);
+            self.want = st;
+        } else {
+            let (inp, _) = inputs(snap, cfg);
+            self.inp = inp;
+            self.want = self.trig.desired(&signals(snap, crash), cfg.gpu.temp_amber_c, cfg.gpu.temp_red_c, now_ms);
+        }
         if self.paused || !self.armed {
             if self.hidden() {
                 return;
@@ -365,7 +498,7 @@ impl Companion {
     pub unsafe fn on_dpi(&mut self, dpi: u32) {
         let key = hex::scale_key(dpi as f32 / 96.0);
         if key != self.key {
-            if let Some(at) = Atlas::load(key) {
+            if let Some(at) = Atlas::load(self.skin, key) {
                 self.at = at;
                 self.key = key;
                 self.edge_geo = None;
@@ -867,7 +1000,10 @@ unsafe extern "system" fn hex_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         WM_LBUTTONUP => {
             ReleaseCapture();
             if a.comp.as_mut().unwrap().down_at.take().is_some() {
-                a.hex_toggle_bubble();
+                let cfg = a.cfg.clone();
+                if !a.comp.as_mut().unwrap().on_click(&cfg) {
+                    a.hex_toggle_bubble();
+                }
             }
             return 0;
         }
@@ -1045,6 +1181,8 @@ impl App {
 
     /// Poll tick in companion mode: sprite state/colours, and the bubble while it is open.
     pub(super) fn hex_poll(&mut self) {
+        // read before the announcement marks the report as told
+        let crash = self.s.snap.insights.report_new;
         if self.s.snap.insights.report_new && self.cfg.hex_announce {
             self.hex_announce();
         } else if self.s.snap.insights.preflight_new && self.cfg.hex_announce {
@@ -1056,7 +1194,7 @@ impl App {
         let (c, mut ctx) = self.bubble_ctx_parts();
         if let Some(c) = c {
             unsafe {
-                c.on_poll(ctx.snap, ctx.cfg, now, dump.as_deref());
+                c.on_poll(ctx.snap, ctx.cfg, now, crash, dump.as_deref());
                 if c.b_open && c.b_anim.is_none() {
                     c.render_bubble(&mut ctx);
                 }
@@ -1071,7 +1209,7 @@ impl App {
             if m == UiMode::Companion {
                 if self.comp.is_none() {
                     let hinst = GetModuleHandleW(null());
-                    self.comp = Companion::new(hinst, &self.cfg, &self.s.snap);
+                    self.comp = Companion::new(hinst, &self.cfg, &self.s.snap, self.demo);
                 }
                 if self.comp.is_none() {
                     return;

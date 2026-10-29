@@ -1,5 +1,32 @@
 # Changelog
 
+## v1.3.0 — 2026-10-29
+
+Hex, the companion, is redrawn (Tachy v5) and gets two new states. Everything else works as in 1.2.0, still read-only.
+
+**New look: Tachy v5**
+- A cleaner hexagon with no outline and calm, shape-driven eyes: the eye shape alone tells the state, even at 1x.
+- Ambient motion around him again, drawn as part of the sprite: sparkles while rendering, heat waves when hot, a sweat drop when VRAM is full, z's when sleepy, a happy blink now and then at idle.
+- Two built-in skins: **Velvet** (default, a soft glowing glass) and **Aurora flat** (a flat gradient with a fine grain). Both are embedded atlases at 1x, 1.5x and 2x (`res/hex/velvet/`, `res/hex/flat/`), drawn by the same compositor.
+
+**Companion skin setting**
+- Settings > General > *Companion skin*: Velvet / Aurora flat, applies at once (no restart). In `tachyon.toml`: `hex_skin = "velvet"` or `"flat"`.
+- Older settings files load unchanged (Velvet); an unknown value falls back to Velvet instead of failing. *Reset settings* goes back to Velvet.
+
+**Two new states: VRAM full and alarm**
+- **VRAM full:** on at 92 % or more of VRAM for about 3 s, off below 85 %. Amber colours, a glance at a small sweat drop that slides down.
+- **Alarm:** on a new crash report (an unexpected restart or GPU driver failure), a GPU driver reset in the last minute, or the red temperature (with 2 °C hysteresis). Red, with a pulse, a small jolt, trembling eyes and '!' ticks. It stays at least 10 s; after a crash report until you click Hex or the next render starts.
+- Priority when several apply: alarm > hot > VRAM full > render > sleepy > idle. Hot keeps its amber threshold, now with 2 °C hysteresis.
+
+**Preview flags**
+- `tachyon.exe --hex-demo` cycles through the six states, 8 s each; `tachyon.exe --hex-state=NAME` holds one (`idle`, `render` or `busy`, `hot`, `vram`, `alarm`, `sleepy`). A click on Hex goes to the next state. Preview mode always starts as Hex, uses made-up readings, records nothing (no flight recorder, history or fast sampling) and does not change the saved start mode.
+- `tachyon.exe --version` prints the version and exits.
+
+**Build and tests**
+- 203 tests on Linux (198 in 1.2.0): state priority, the VRAM and temperature thresholds with their hysteresis, crash and driver-error alarms with the 10 s minimum and click / next-render acknowledgement, both atlases loading with all six states and every frame they use, the skin setting (default, round trip, unknown values).
+- The app compositor matches the approved v5 design renders within one level out of 255 on every frame of all six states, the blinks and the transitions, on both skins and all three scales (324 frames).
+- Tested on Windows 11 with an RTX 5080 alongside a running 1.2.0: all six states on both skins, `--hex-demo`, the live skin switch in Settings, the MCP server (same twelve tools) and `tachyon mark`. About 1 % of one core while animating, 28 MB private memory.
+
 ## v1.2.0 — 2026-10-29
 
 Four additions for render machines, all read-only like before, plus clearer crash and job reports.

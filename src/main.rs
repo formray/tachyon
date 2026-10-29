@@ -20,6 +20,11 @@ fn mark_requested() -> Option<Vec<String>> {
     a.first().is_some_and(|x| x.eq_ignore_ascii_case("mark")).then(|| a[1..].to_vec())
 }
 
+/// `tachyon --version` / `-V`: print "tachyon X.Y.Z" and exit.
+fn version_requested() -> bool {
+    std::env::args().nth(1).is_some_and(|a| a == "--version" || a == "-V")
+}
+
 fn run_mark(args: Vec<String>) -> ! {
     let (code, line) = tachyon::markers::cli(&args, tachyon::config::data_dir(), tachyon::telemetry::now_ms());
     #[cfg(windows)]
@@ -65,6 +70,11 @@ fn safe_dll_search() {
 #[cfg(windows)]
 fn main() {
     safe_dll_search();
+    if version_requested() {
+        attach_console();
+        println!("tachyon {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
     if let Some(a) = mark_requested() {
         run_mark(a);
     }
@@ -80,6 +90,9 @@ fn main() {
 #[cfg(not(windows))]
 fn main() {
     use tachyon::{config, nvml, scan};
+    if version_requested() {
+        return println!("tachyon {}", env!("CARGO_PKG_VERSION"));
+    }
     if let Some(a) = mark_requested() {
         run_mark(a);
     }

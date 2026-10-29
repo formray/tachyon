@@ -23,6 +23,7 @@ const TABS: [(Tab, &str); 5] =
 pub(super) enum Ctl {
     Tab(u8),
     Mode(u8),
+    Skin(u8),
     Announce,
     BubbleClose,
     Poll,
@@ -262,6 +263,11 @@ impl App {
                 let msel = MODES.iter().position(|m| *m == mode).unwrap_or(2);
                 let ml: Vec<&str> = MODES.iter().map(|m| st::mode_label(*m)).collect();
                 self.segments(g, xr, cy, &ml, msel, |i| Btn::Set(Ctl::Mode(i), 0));
+                y += ROW;
+                let cy = self.row(g, x0, xr, y, "Companion skin", "How Hex looks; applies at once", 190.0);
+                let ssel = HexSkin::ALL.iter().position(|k| *k == c.hex_skin).unwrap_or(0);
+                let sl: Vec<&str> = HexSkin::ALL.iter().map(|k| k.label()).collect();
+                self.segments(g, xr, cy, &sl, ssel, |i| Btn::Set(Ctl::Skin(i), 0));
                 y += ROW;
                 let cy = self.row(g, x0, xr, y, "Hex announces crash reports", "Opens its bubble once after an unexpected stop", 50.0);
                 self.toggle(g, xr, cy, c.hex_announce, Btn::Set(Ctl::Announce, 0));
@@ -571,6 +577,11 @@ impl App {
                 }
                 changed = false;
             }
+            Ctl::Skin(i) => {
+                let k = HexSkin::ALL[(i as usize).min(HexSkin::ALL.len() - 1)];
+                changed = k != c.hex_skin;
+                c.hex_skin = k;
+            }
             Ctl::Announce => c.hex_announce = !c.hex_announce,
             Ctl::BubbleClose => c.bubble_close_secs = st::cycle_clamped(&BUBBLE_STEPS, c.bubble_close_secs, d),
             Ctl::Poll => c.poll_ms = st::cycle_clamped(&POLL_STEPS, c.poll_ms, d),
@@ -648,9 +659,10 @@ impl App {
                             su.msg = Some(("Settings reset. The previous file is kept as tachyon.toml.bak.".into(), T_CYAN));
                             su.saved_at = Some(chrono::Local::now().format("%H:%M:%S").to_string());
                             su.backed_up = true;
-                            self.s.apply(self.cfg.clone());
+                            self.s.apply(sampler_cfg(&self.cfg, self.demo.is_some()));
                             if let Some(cp) = self.comp.as_mut() {
                                 cp.b_close_secs = self.cfg.bubble_close_secs;
+                                unsafe { cp.set_skin(self.cfg.hex_skin) };
                             }
                         }
                         Err(e) => su.msg = Some((e, T_AMBER)),
@@ -726,9 +738,11 @@ impl App {
                 Err(e) => su.msg = Some((e, T_AMBER)),
             }
         }
-        self.s.apply(self.cfg.clone());
+        self.s.apply(sampler_cfg(&self.cfg, self.demo.is_some()));
         if let Some(c) = self.comp.as_mut() {
             c.b_close_secs = self.cfg.bubble_close_secs;
+            // the companion skin applies live
+            unsafe { c.set_skin(self.cfg.hex_skin) };
         }
         if self.cfg.poll_ms != old_poll {
             self.s_poll_ms = self.cfg.poll_ms;

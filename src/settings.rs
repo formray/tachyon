@@ -153,6 +153,7 @@ pub fn with_settings(text: &str, c: &Config) -> Result<String, String> {
     top!("agent_api", agent_api, c.agent_api);
     top!("hex_announce", hex_announce, c.hex_announce);
     top!("bubble_close_secs", bubble_close_secs, c.bubble_close_secs as i64);
+    top!("hex_skin", hex_skin, c.hex_skin.as_str());
     top!("vram_forecast_minutes", vram_forecast_minutes, c.vram_forecast_minutes as i64);
     if old.price_per_kwh != c.price_per_kwh {
         match c.price_per_kwh {

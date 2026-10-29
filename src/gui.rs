@@ -16,7 +16,7 @@ use crate::present::{self, Surface};
 use std::ptr::{null, null_mut};
 use std::time::{Duration, Instant};
 use tachyon::aurora::{Aurora, Field};
-use tachyon::config::{self, Config, GlassMode, Level, UiMode};
+use tachyon::config::{self, Config, GlassMode, HexSkin, Level, UiMode};
 use tachyon::glass::{self, Body, FieldLayout, Geometry, LevelFill, ShadowSpec, Shape};
 use tachyon::monitor::{Island, Metric, RenderView, Sampler, Series, Snapshot, WINDOW_SECS, filter_procs, island_pos};
 use tachyon::nvml::throttle_words;
@@ -542,6 +542,8 @@ struct App {
     boot_blackbox: (bool, u32),
     /// the poll timer's current interval
     s_poll_ms: u64,
+    /// `--hex-demo` / `--hex-state=NAME`: Hex previews its states (see companion::Demo)
+    demo: Option<companion::Demo>,
 }
 
 static mut APP: *mut App = null_mut();
@@ -595,6 +597,19 @@ fn app() -> Option<&'static mut App> {
     unsafe { APP.as_mut() }
 }
 
+/// The sampler's settings: a Hex preview (`--hex-demo`) records nothing (no flight recorder,
+/// history, fast sampler or per-process VRAM files), so it can run next to a normal Tachyon.
+fn sampler_cfg(cfg: &Config, demo: bool) -> Config {
+    let mut c = cfg.clone();
+    if demo {
+        c.blackbox = false;
+        c.history = false;
+        c.fast_sampling = false;
+        c.proc_vram_secs = 0;
+    }
+    c
+}
+
 fn temps(cfg: &Config) -> (f32, f32) {
     (cfg.gpu.temp_amber_c, cfg.gpu.temp_red_c)
 }
@@ -635,7 +650,9 @@ pub fn run() {
         }
         let m1 = mem_mb();
         mem_log.push(("DirectWrite + fonts", m1.0, m1.1));
-        let mut s = Sampler::new(cfg.clone());
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        let demo = companion::Demo::from_args(&args);
+        let mut s = Sampler::new(sampler_cfg(&cfg, demo.is_some()));
         s.tick();
         let m2 = mem_mb();
         mem_log.push(("NVML + first sample", m2.0, m2.1));
@@ -727,6 +744,7 @@ pub fn run() {
             set: None,
             boot_blackbox: (false, 0),
             s_poll_ms: 0,
+            demo,
         }));
         APP = a;
         let ap = &mut *a;
@@ -743,8 +761,14 @@ pub fn run() {
             ap.set = Some(Box::new(settings::SetUi::new(tab)));
         }
         // the first start, and a start with something to say, open the panel where the message is
-        let speak = first_run || ap.warn.is_some();
-        let start = if speak && std::env::var_os("TACHYON_VIEW").is_none() { UiMode::Panel } else { ap.cfg.start_mode() };
+        let speak = (first_run || ap.warn.is_some()) && ap.demo.is_none();
+        let start = if ap.demo.is_some() {
+            UiMode::Companion // a preview always shows Hex (the saved start mode is not changed)
+        } else if speak && std::env::var_os("TACHYON_VIEW").is_none() {
+            UiMode::Panel
+        } else {
+            ap.cfg.start_mode()
+        };
         ap.mode = start;
         if start != UiMode::Companion {
             ap.cfg.window.compact = start == UiMode::Island;
@@ -768,7 +792,7 @@ pub fn run() {
         ap.shape = if island { ap.island_rect_from_cfg() } else { ap.panel_rect_from_cfg() };
         if start == UiMode::Companion {
             ap.cfg.window.compact = false;
-            ap.comp = companion::Companion::new(hinst, &ap.cfg, &ap.s.snap);
+            ap.comp = companion::Companion::new(hinst, &ap.cfg, &ap.s.snap, ap.demo);
             match ap.comp.as_mut() {
                 Some(c) => {
                     ap.main_hidden = true;

@@ -117,6 +117,8 @@ pub struct Snapshot {
     pub driver: String,
     pub selected: u32,
     pub error: Option<String>,
+    /// The driver reset or the GPU stopped answering within the last minute (Hex's alarm).
+    pub gpu_lost: bool,
     pub sample: Option<GpuSample>,
     pub procs: Option<Vec<ProcView>>,
     pub hist: History,
@@ -508,6 +510,7 @@ impl Sampler {
         s.selected = sel;
         self.selected = sel;
         s.error = if self.nvml.is_none() { Some(self.err.clone().unwrap_or_else(|| "NVML unavailable".into())) } else { None };
+        s.gpu_lost = self.lost_at.is_some_and(|l| t0 - l < Duration::from_secs(60));
         if let Some(g) = &sample {
             s.hist.record(t, g);
         }

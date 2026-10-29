@@ -1,4 +1,4 @@
-Tachyon 1.2.0
+Tachyon 1.3.0
 =============
 
 The lightest real-time GPU monitor for NVIDIA cards, and the one that explains
@@ -9,6 +9,16 @@ load, temperature, VRAM, power, clocks, fan, video encoder/decoder, PCIe
 traffic, what is limiting the clocks, and which programs are using the GPU
 (with the program that launched them and a category: Game, Creative app,
 Script/Python, Browser, AI/agent, System or Other).
+
+New in 1.3.0
+- Hex, the desktop companion, is redrawn (Tachy v5) in two skins: Velvet
+  (default) and Aurora flat. Switch in Settings > General > Companion skin;
+  it applies at once.
+- Two new Hex states: VRAM full (a small sweat drop) and alarm (after a
+  crash report, a GPU driver reset or at the red temperature).
+- Preview every state: "tachyon.exe --hex-demo" cycles through all six,
+  "tachyon.exe --hex-state=alarm" holds one (idle, render, hot, vram,
+  alarm, sleepy). Nothing is recorded in preview mode.
 
 New in 1.2.0
 - Render job reports: a script calls "tachyon mark start --job NAME" and

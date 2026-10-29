@@ -71,6 +71,9 @@ pub struct Config {
     pub hex_announce: bool,
     /// Hex's bubble closes by itself after this many seconds without the pointer on it (0 = stays open).
     pub bubble_close_secs: u64,
+    /// Hex's look: "velvet" (soft-touch matte, the default) or "flat" (Aurora flat duotone).
+    /// Older files without the key, and unknown values, get Velvet.
+    pub hex_skin: HexSkin,
     /// Warn when VRAM would be full within this many minutes at the current rate (0 = no forecast warning).
     pub vram_forecast_minutes: u32,
     pub gpu: GpuThresholds,
@@ -126,6 +129,52 @@ impl<'de> Deserialize<'de> for GlassMode {
             }
         }
         d.deserialize_any(V)
+    }
+}
+
+/// Hex's skin (`hex_skin = "velvet" | "flat"`). Unknown values load as Velvet instead of failing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HexSkin {
+    #[default]
+    Velvet,
+    Flat,
+}
+
+impl HexSkin {
+    pub const ALL: [HexSkin; 2] = [HexSkin::Velvet, HexSkin::Flat];
+    pub fn as_str(self) -> &'static str {
+        match self {
+            HexSkin::Velvet => "velvet",
+            HexSkin::Flat => "flat",
+        }
+    }
+    /// Name on the Settings page.
+    pub fn label(self) -> &'static str {
+        match self {
+            HexSkin::Velvet => "Velvet",
+            HexSkin::Flat => "Aurora flat",
+        }
+    }
+    /// Lenient: "flat", "aurora flat", "aurora_flat" -> Flat; anything else -> Velvet.
+    pub fn parse(v: &str) -> HexSkin {
+        match v.trim().to_ascii_lowercase().replace(['_', '-'], " ").as_str() {
+            "flat" | "aurora flat" | "aurora" => HexSkin::Flat,
+            _ => HexSkin::Velvet,
+        }
+    }
+}
+
+impl Serialize for HexSkin {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for HexSkin {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        // any value (string or not) loads: unknown -> Velvet, so a typo never breaks the file
+        let v = toml::Value::deserialize(d)?;
+        Ok(v.as_str().map(HexSkin::parse).unwrap_or_default())
     }
 }
 
@@ -448,6 +497,7 @@ impl Default for Config {
             agent_api: false,
             hex_announce: true,
             bubble_close_secs: 8,
+            hex_skin: HexSkin::Velvet,
             vram_forecast_minutes: 15,
             gpu: GpuThresholds::default(),
             window: WindowCfg::default(),
@@ -625,6 +675,7 @@ pub const HEADER: &str = "# Tachyon settings. Most of these are on the Settings 
 # Set util_band_low/util_band_high under [gpu] to colour GPU load by a target band.\n\
 # glass = \"tint\" (default look), \"blur\" (experimental desktop blur) or \"auto\".\n\
 # mode = \"island\", \"companion\" (Hex) or \"panel\" picks how Tachyon starts (also in the right-click menu).\n\
+# hex_skin = \"velvet\" (default) or \"flat\" (Aurora flat) picks how Hex looks (also on the Settings page).\n\
 # blackbox and history keep their files in %LOCALAPPDATA%\\Tachyon. Nothing leaves this PC.\n\
 # price_per_kwh = 0.30 shows what each job cost. agent_api = true lets local AI agents read the state (tachyon mcp).\n";
 
@@ -784,6 +835,22 @@ pub fn save_window(path: &Path, w: &WindowCfg) {
 mod tests {
     use super::*;
     #[test]
+    fn hex_skin_defaults_to_velvet_and_survives_unknown_values() {
+        assert_eq!(Config::default().hex_skin, HexSkin::Velvet);
+        let c: Config = toml::from_str("hex_skin = \"flat\"\n").unwrap();
+        assert_eq!(c.hex_skin, HexSkin::Flat);
+        let c: Config = toml::from_str("hex_skin = \"Aurora flat\"\n").unwrap();
+        assert_eq!(c.hex_skin, HexSkin::Flat);
+        for bad in ["hex_skin = \"frost\"\n", "hex_skin = 3\n", "hex_skin = \"\"\n"] {
+            let c: Config = toml::from_str(bad).unwrap();
+            assert_eq!(c.hex_skin, HexSkin::Velvet, "{bad}");
+        }
+        // round trip
+        let s = toml::to_string_pretty(&Config { hex_skin: HexSkin::Flat, ..Config::default() }).unwrap();
+        assert!(s.contains("hex_skin = \"flat\""));
+        assert_eq!(toml::from_str::<Config>(&s).unwrap().hex_skin, HexSkin::Flat);
+    }
+    #[test]
     fn defaults_roundtrip_and_partial_file() {
         let s = toml::to_string_pretty(&Config::default()).unwrap();
         let c: Config = toml::from_str(&s).unwrap();
@@ -803,6 +870,8 @@ mod tests {
         assert!(!s.contains("price_per_kwh"), "unset price is not written");
         // Settings-page keys keep the 1.0 behaviour by default
         assert!(p.hex_announce);
+        // no hex_skin key (older files): Velvet
+        assert_eq!(p.hex_skin, HexSkin::Velvet);
         assert_eq!((p.bubble_close_secs, p.vram_forecast_minutes), (8, 15));
     }
 

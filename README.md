@@ -28,6 +28,21 @@ the [changelog](CHANGELOG.md#previews).
 
 ## Features
 
+New in 1.3:
+
+- **Tachy v5, a redrawn Hex.** A cleaner hexagon with calm, shape-driven eyes and
+  ambient motion around him: sparkles while rendering, heat waves when hot, a sweat drop
+  when VRAM is full, z's when sleepy. Two built-in skins, **Velvet** (default) and
+  **Aurora flat**, switched in Settings > General > *Companion skin* and applied at once.
+- **Two new states.** *VRAM full* (92 % or more for about 3 s, off below 85 %) and
+  *alarm* (a new crash report, a GPU driver reset or the red temperature; at least 10 s,
+  after a crash until you click Hex or the next render starts). Priority: alarm > hot >
+  VRAM full > render > sleepy > idle.
+- **Preview flags.** `tachyon.exe --hex-demo` cycles through the six states;
+  `tachyon.exe --hex-state=alarm` holds one. Nothing is recorded in preview mode.
+
+<img alt="Hex in its six states, Velvet (top) and Aurora flat (bottom), drawn by Tachyon's own compositor" src="docs/v1_3_hex_states.png" width="760">
+
 New in 1.2:
 
 - **100 ms fast sampling.** A small thread reads the clocks, power against the limit,
@@ -118,7 +133,7 @@ polling, no cloud, no AI model):
 
 Carried over from the previews:
 
-- **One portable exe, about 1.8 MB.** No installer, no runtime, no OpenGL,
+- **One portable exe, under 3 MB.** No installer, no runtime, no OpenGL,
   no GPU context of its own: it does not wake the GPU it is measuring.
 - **Aurora glass:** frosted glass with a soft live colour field. Its hue
   follows the GPU load (blue to violet) and an ember warms up with the
@@ -129,10 +144,12 @@ Carried over from the previews:
   - **Island:** a capsule at the top of the screen, always on top, with load,
     temperature, VRAM and power. While a render runs the glow fills it like a
     progress bar, with the job, the frames and the ETA.
-  - **Companion (Hex):** a small glass hexagon with eyes that sits on your
-    desktop. It breathes and blinks now and then, draws a glowing progress
-    line round its edge during a render, gets warm (with a little steam) when
-    the card is hot and falls asleep after ten quiet minutes. Click it for a
+  - **Companion (Hex):** a small hexagon with eyes that sits on your
+    desktop, in two skins (Velvet or Aurora flat). It breathes and blinks now
+    and then, draws a glowing progress line round its edge with sparkles
+    during a render, gets warm (with heat waves) when the card is hot, sweats
+    when VRAM is full, raises the alarm after a crash, a driver reset or at
+    the red temperature, and falls asleep after ten quiet minutes. Click it for a
     speech bubble: render progress, load and temperature, the biggest VRAM
     user, four key numbers and *Open panel*.
   - **Panel:** the full window, sized to its content.
@@ -201,6 +218,13 @@ it. Right-click anywhere for the menu: GPU, pin, show all processes,
 **Mode** (island / companion / panel), **Crash report**, **Job history**,
 **Export flight recorder** and quit. Tachyon has no taskbar button.
 
+To preview Hex's states without waiting for them: `tachyon.exe --hex-demo` cycles
+through idle, render, hot, VRAM full, alarm and sleepy (8 s each), and
+`tachyon.exe --hex-state=NAME` holds one (`idle`, `render`, `hot`, `vram`, `alarm`,
+`sleepy`); a click on Hex goes to the next one. Preview mode uses made-up readings,
+records nothing and does not change how Tachyon starts next time.
+`tachyon.exe --version` prints the version.
+
 In the panel, *Why? ›* next to the bottleneck explains it, *Open report ›*
 opens the crash report and *History ›* the job list. In Hex's bubble, *Why
 is it slow? ›* swaps the bubble for the answer.
@@ -214,7 +238,7 @@ top of the panel. Five tabs:
 
 | Tab | What you can change |
 |---|---|
-| General | Display mode (island, Hex, panel); whether Hex announces crash reports; how long Hex's bubble stays open (5–30 s or until clicked); refresh rate (0.25–2 s); *Start with Windows*; which GPU to show, when there is more than one |
+| General | Display mode (island, Hex, panel); Hex's skin (Velvet or Aurora flat, applies at once); whether Hex announces crash reports; how long Hex's bubble stays open (5–30 s or until clicked); refresh rate (0.25–2 s); *Start with Windows*; which GPU to show, when there is more than one |
 | Projects | Render folders to watch (up to 12): add with a folder picker, remove with × |
 | Alerts | Temperature amber and red; VRAM amber and red (GB); how far ahead the VRAM forecast warns (5–60 min, or off) |
 | Data | Flight recorder on/off and how many minutes it keeps; job history on/off; energy price and currency; *Reset settings*; where the data lives and how to remove Tachyon |
@@ -275,6 +299,7 @@ currency = "EUR"
 agent_api = false           # true = let `tachyon.exe mcp` answer AI agents
 hex_announce = true         # Hex opens its bubble once after an unexpected stop
 bubble_close_secs = 8       # Hex's bubble closes after this; 0 = only when clicked
+hex_skin = "velvet"         # 1.3: "velvet" or "flat" (Aurora flat); unknown values = velvet
 vram_forecast_minutes = 15  # warn when VRAM would be full this soon; 0 = off
 
 [gpu]
@@ -431,10 +456,10 @@ poll draws only the live values, and nothing is presented when nothing
 changed. Hit testing follows the alpha: the shadow and the space around
 the shapes let clicks through.
 
-**Hex** is a sprite atlas (three 8-bit masks for 1x, 1.5x and 2x, about
-140 KB) embedded in the exe and decoded by a small built-in PNG reader for
-the current DPI only. A script of states (idle, render, hot, sleepy) with
-hysteresis picks the frames; the progress edge is a distance-field stroke
+**Hex** is a sprite atlas per skin (three 8-bit masks for 1x, 1.5x and 2x
+each) embedded in the exe and decoded by a small built-in PNG reader for
+the current DPI and skin only. A script of six states (idle, render, hot,
+VRAM full, alarm, sleepy), chosen by triggers with hysteresis, picks the frames; the progress edge is a distance-field stroke
 with an analytic glow, cached per 0.1 % of progress. Each drawn frame arms
 one one-shot timer for its hold (0.33 s to 2 s; 12 fps only for blinks and
 transitions), and Hex pauses while it is hidden or a fullscreen app is in
@@ -530,6 +555,10 @@ under wine.
 | ![1.1: pre-render check in the panel](docs/v1_1_preflight_panel.png) | ![1.1: Hex warns before the job runs out of memory](docs/v1_1_hex_preflight.png) |
 | ![1.1: Hex names the probable cause](docs/v1_1_hex_crash_diagnosis.png) | |
 | ![Settings: General](docs/v1_settings.png) | ![Settings: AI agents, agent API on](docs/v1_settings_ai.png) |
+
+Hex 1.3 (Tachy v5) in motion, both skins (the approved design preview):
+
+<img alt="Hex 1.3 in motion: idle, render, hot, VRAM full, alarm and sleepy in Velvet and Aurora flat" src="docs/v1_3_hex_motion.gif" width="760">
 
 ## Known limits
 

@@ -1,0 +1,33 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.10.0.schema.json
+PackageIdentifier: Formray.Tachyon
+PackageVersion: 1.3.0
+PackageLocale: en-US
+Publisher: Formray
+PublisherUrl: https://formray.io
+PublisherSupportUrl: https://github.com/formray/tachyon/issues
+PrivacyUrl: https://github.com/formray/tachyon#your-data-and-privacy
+Author: Formray
+PackageName: Tachyon
+PackageUrl: https://github.com/formray/tachyon
+License: MIT OR Apache-2.0
+LicenseUrl: https://github.com/formray/tachyon/blob/main/LICENSE-MIT
+Copyright: (c) 2026 Formray
+ShortDescription: Lightweight, read-only NVIDIA GPU monitor that explains what the GPU is doing.
+Description: |-
+  Tachyon shows how an NVIDIA graphics card is working, live: load, temperature, VRAM, power,
+  clocks, video engines, PCIe and which programs use the GPU. It explains what is holding work
+  back, warns before VRAM runs out, keeps a flight recorder for crash reports and a job history,
+  and can answer local AI agents over MCP (off by default). No network access, no telemetry,
+  no installer: a single portable exe.
+Moniker: tachyon
+Tags:
+  - gpu
+  - nvidia
+  - monitor
+  - nvml
+  - vram
+  - rendering
+  - mcp
+ReleaseNotesUrl: https://github.com/formray/tachyon/releases/tag/v1.3.0
+ManifestType: defaultLocale
+ManifestVersion: 1.10.0

@@ -1,12 +1,12 @@
 {
-    "version": "1.2.0",
+    "version": "1.3.0",
     "description": "Lightweight, read-only NVIDIA GPU monitor that explains what the GPU is doing.",
     "homepage": "https://github.com/formray/tachyon",
     "license": "MIT|Apache-2.0",
     "notes": "Settings are kept in $persist_dir\\tachyon.toml; data in %LOCALAPPDATA%\\Tachyon.",
     "architecture": {
         "64bit": {
-            "url": "https://github.com/formray/tachyon/releases/download/v1.2.0/Tachyon_v1.2.0.zip",
+            "url": "https://github.com/formray/tachyon/releases/download/v1.3.0/Tachyon_v1.3.0.zip",
             "hash": "0000000000000000000000000000000000000000000000000000000000000000"
         }
     },
