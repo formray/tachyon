@@ -59,7 +59,7 @@ jobs:
           npx --yes @anthropic-ai/mcpb@2.1.2 validate out/mcpb/manifest.json
           npx --yes @anthropic-ai/mcpb@2.1.2 pack out/mcpb "out/tachyon-$V-windows-x64.mcpb"
           (cd out && sha256sum tachyon.exe "Tachyon_${GITHUB_REF_NAME}.zip" "tachyon-$V-windows-x64.mcpb" > SHA256SUMS.txt && cat SHA256SUMS.txt)
-          awk -v t="## ${GITHUB_REF_NAME}" '$0==t{f=1;next} /^## /{f=0} f' CHANGELOG.md > out/notes.md
+          awk -v t="## ${GITHUB_REF_NAME}" '$0==t || index($0, t " ")==1 {f=1;next} /^## /{f=0} f' CHANGELOG.md > out/notes.md
           test -s out/notes.md || echo "Tachyon ${GITHUB_REF_NAME}" > out/notes.md
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:

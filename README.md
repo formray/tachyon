@@ -28,7 +28,7 @@ the [changelog](CHANGELOG.md#previews).
 
 ## Features
 
-New in 1.2 (draft, not released yet):
+New in 1.2:
 
 - **100 ms fast sampling.** A small thread reads the clocks, power against the limit,
   temperature, load, the clock-limit reasons and the PCIe link ten times a second into a

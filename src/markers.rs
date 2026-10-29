@@ -214,11 +214,26 @@ impl JobReport {
         (s, tone)
     }
 
+    /// Reports saved by 1.2 test builds counted idle power-saving readings (Gen2 just after an
+    /// idle minute) as the lowest link. With no degraded event the link was never slow under load,
+    /// so the lowest under load is the best link (or unknown when the GPU was never busy).
+    pub fn revise(&mut self) {
+        let p = &mut self.pcie;
+        if p["degraded_events"].as_u64() != Some(0) || p["lowest_seen"].is_null() || p["lowest_seen"] == p["best_possible"] {
+            return;
+        }
+        let busy = self.gpu_util_avg.is_some_and(|u| u >= crate::pcie::BUSY_UTIL as f32);
+        p["lowest_seen"] = if busy { p["best_possible"].clone() } else { serde_json::Value::Null };
+    }
+
     /// The PCIe link during the job in plain words.
     pub fn pcie_sentence(&self) -> String {
         let p = &self.pcie;
         let s = |k: &str| p[k].as_str().map(str::to_string);
         match (s("lowest_seen"), s("best_possible")) {
+            (None, Some(best)) if p["degraded_events"].as_u64().unwrap_or(0) == 0 => {
+                format!("The GPU was not busy enough to test the link (best possible: {}).", link_gloss(&best))
+            }
             (Some(low), Some(best)) if low == best && p["degraded_events"].as_u64().unwrap_or(0) == 0 => {
                 format!("{} for the whole job: the fastest this slot allows.", link_gloss(&best))
             }
@@ -267,6 +282,28 @@ impl JobReport {
             profile: Default::default(),
         }
     }
+}
+
+/// The link of one reading if it counts for "the lowest under load": the GPU busy (or a link
+/// narrower than the slot, which is never power saving) and the link not idle-saving or still
+/// training up. When degraded, the 100 ms minimum of this second counts too.
+fn under_load_link(l: &LinkStatus, util: Option<u8>, fast: &FastAgg) -> Option<(u32, u32)> {
+    use crate::pcie::State;
+    let busy = util.is_some_and(|u| u >= crate::pcie::BUSY_UTIL);
+    let counts = match l.state? {
+        State::DegradedWidth => true,
+        State::Full | State::DegradedGen => busy,
+        State::IdleSaving | State::Settling | State::Unknown => false,
+    };
+    if !counts {
+        return None;
+    }
+    let (mut g, mut w) = (l.gen_?, l.width?);
+    if l.state.is_some_and(crate::pcie::State::degraded) {
+        g = g.min(fast.min_gen.map_or(g, u32::from));
+        w = w.min(fast.min_width.map_or(w, u32::from));
+    }
+    Some((g, w))
 }
 
 /// History keys of marked jobs start with this.
@@ -459,6 +496,8 @@ struct Acc {
     link_state_end: Option<String>,
     link_degraded_at_start: u32,
     link_degraded_now: u32,
+    /// The slowest link seen under load (idle power saving and training up are not counted).
+    load_low: Option<(u32, u32)>,
     procs: BTreeMap<String, f32>,
     kinds: BTreeMap<&'static str, u32>,
 }
@@ -543,6 +582,9 @@ impl Acc {
             self.link_best = Some(l.best.clone());
             self.link_state_end = l.state.map(|s| s.words().to_string());
             self.link_degraded_now = l.degraded_events;
+            if let Some(low) = under_load_link(l, s.util, fast) {
+                self.load_low = Some(self.load_low.map_or(low, |cur| cur.min(low)));
+            }
         }
         if let Some(k) = kind {
             *self.kinds.entry(k.label()).or_default() += 1;
@@ -583,10 +625,9 @@ impl Acc {
             .map(String::from)
             .collect();
         let degraded = self.link_degraded_now.saturating_sub(self.link_degraded_at_start);
-        let worst = match (self.fast.min_gen, self.fast.min_width) {
-            (None, None) => None,
-            (g, w) => Some(crate::pcie::link_text(g.map(u32::from), w.map(u32::from))),
-        };
+        // the slowest link under load only: an idle downshift (Gen1/Gen2 to save power, e.g. the
+        // first readings after an idle minute) is normal and not "the lowest the job saw"
+        let worst = self.load_low.map(|(g, w)| crate::pcie::link_text(Some(g), Some(w)));
         let pcie = serde_json::json!({
             "at_start": self.link_start,
             "at_end": self.link_end,
@@ -821,7 +862,8 @@ pub fn reports(history_dir: &Path, n: usize) -> Vec<JobReport> {
     for name in [REPORTS_OLD, REPORTS] {
         let Ok(f) = std::fs::File::open(history_dir.join(name)) else { continue };
         for line in std::io::BufReader::new(f.take(MAX_REPORTS_BYTES * 2)).lines().map_while(Result::ok) {
-            if let Ok(r) = serde_json::from_str::<JobReport>(&line) {
+            if let Ok(mut r) = serde_json::from_str::<JobReport>(&line) {
+                r.revise();
                 v.push(r);
             }
         }
@@ -926,6 +968,81 @@ mod tests {
         assert_eq!(tr.notes.len(), 1);
         let tr2 = MarkerTracker::open(&d, t0 + 70_000);
         assert_eq!(tr2.open_jobs(t0 + 70_000)[0].job, "overnight");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Live test "test 1.2 A" run 2 (RTX 5080, 29 Oct 2026): a minute idle before the job, so the
+    /// link was at Gen2 to save power and the first 100 ms readings of the job still saw Gen2.
+    /// The report said "Between Gen2 x16 and Gen5 x16" with no slowdown. Only readings under
+    /// load count: the lowest is Gen5 x16. A real slowdown under load still shows.
+    #[test]
+    fn idle_power_saving_before_a_job_is_not_its_lowest_link() {
+        let d = tmp("pcie_idle");
+        let t0 = 1_793_000_000_000i64;
+        let mut tr = MarkerTracker::open(&d, t0);
+        let mut link = crate::pcie::LinkTracker::default();
+        let fast_at = |g: u8| FastAgg { n: 10, min_gen: Some(g), min_width: Some(16), period_ms: 100, ..Default::default() };
+        // 60 s idle at Gen2 x16
+        for i in 0..60 {
+            link.push(t0 + i * 1000, Some(2), Some(16), Some(5), Some(16), Some(1));
+            tr.tick(&s(t0 + i * 1000, 1, 30.0, 2000.0), &fast_at(2), Some(&link.status), None, None);
+        }
+        write_mark(&d, "start", "test 1.2 A", t0 + 60_000).unwrap();
+        let mut done = vec![];
+        for i in 60..120 {
+            let t = t0 + i * 1000;
+            // the first second of load: the link reads Gen2 for a moment, then Gen5 x16
+            let (g_now, fast) = if i == 60 { (2, fast_at(2)) } else { (5, fast_at(if i == 61 { 2 } else { 5 })) };
+            link.push(t, Some(g_now), Some(16), Some(5), Some(16), Some(99));
+            done.extend(tr.tick(&s(t, 99, 310.0, 11600.0), &fast, Some(&link.status), None, None));
+        }
+        write_mark(&d, "end", "test 1.2 A", t0 + 120_000).unwrap();
+        link.push(t0 + 120_000, Some(5), Some(16), Some(5), Some(16), Some(99));
+        done.extend(tr.tick(&s(t0 + 120_000, 99, 310.0, 11600.0), &fast_at(5), Some(&link.status), None, None));
+        assert_eq!(done.len(), 1);
+        let r = &done[0];
+        assert_eq!(r.pcie["lowest_seen"], "Gen5 x16", "{}", r.pcie);
+        assert_eq!(r.pcie["degraded_events"], 0);
+        assert!(r.pcie_sentence().starts_with("Gen5 x16 (PCIe 5.0, 16 lanes) for the whole job"), "{}", r.pcie_sentence());
+        // the same job with the link stuck at Gen3 under load: that is still reported
+        link.push(t0 + 125_000, Some(2), Some(16), Some(5), Some(16), Some(1));
+        write_mark(&d, "start", "slow link", t0 + 130_000).unwrap();
+        let mut done = vec![];
+        for i in 130..160 {
+            let t = t0 + i * 1000;
+            link.push(t, Some(3), Some(16), Some(5), Some(16), Some(99));
+            done.extend(tr.tick(&s(t, 99, 310.0, 11600.0), &fast_at(3), Some(&link.status), None, None));
+        }
+        write_mark(&d, "end", "slow link", t0 + 160_000).unwrap();
+        done.extend(tr.tick(&s(t0 + 160_000, 99, 310.0, 11600.0), &fast_at(3), Some(&link.status), None, None));
+        assert_eq!(done[0].pcie["lowest_seen"], "Gen3 x16", "{}", done[0].pcie);
+        assert_eq!(done[0].pcie["degraded_events"], 1);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The A2 report as a 1.2 test build saved it is read back with the right lowest link.
+    #[test]
+    fn saved_reports_with_an_idle_lowest_link_are_revised() {
+        let d = tmp("pcie_revise");
+        let h = d.join("history");
+        std::fs::create_dir_all(&h).unwrap();
+        // the A2 line as the test4 build saved it ("lowest_seen": "Gen2 x16", no slowdown)
+        let a2 = include_str!("../tests/samples/marked_job_A2_2026-10-29.json").trim();
+        let light = a2
+            .replace("\"test 1.2 A\"", "\"light\"")
+            .replace("\"gpu_util_avg\":99.3", "\"gpu_util_avg\":4.0")
+            .replace("\"lowest_seen\":\"Gen2 x16\"", "\"lowest_seen\":\"Gen1 x16\"");
+        assert!(light.contains("Gen1 x16") && light.contains(":4.0"));
+        let text = format!("{a2}\n{light}\n");
+        std::fs::write(h.join("marked_jobs.jsonl"), text).unwrap();
+        let r = reports(&h, 10);
+        assert_eq!(r.len(), 2, "{r:?}");
+        let a2 = r.iter().find(|r| r.job == "test 1.2 A").unwrap();
+        assert_eq!(a2.pcie["lowest_seen"], "Gen5 x16");
+        assert!(a2.pcie_sentence().contains("for the whole job"), "{}", a2.pcie_sentence());
+        let light = r.iter().find(|r| r.job == "light").unwrap();
+        assert!(light.pcie["lowest_seen"].is_null());
+        assert!(light.pcie_sentence().starts_with("The GPU was not busy enough"), "{}", light.pcie_sentence());
         let _ = std::fs::remove_dir_all(&d);
     }
 

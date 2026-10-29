@@ -1,8 +1,8 @@
 # Changelog
 
-## v1.2.0 (unreleased)
+## v1.2.0 — 2026-10-29
 
-Four additions for render machines, all read-only like before. Draft: the version in Cargo.toml and the packaging files is still 1.1.0 until the release is prepared.
+Four additions for render machines, all read-only like before, plus clearer crash and job reports.
 
 **A Tachyon-only stop is diagnosed from what happened before it**
 - When Tachyon stops but the PC keeps running (same boot), only evidence up to the stop counts. Events logged later (an app crashing ten minutes after) go to a separate `after_events` list ("After the stop · not related") and are never evidence. After a restart, application crashes logged after the stop are set apart the same way; the restart's own reports at the next boot still count.
@@ -26,6 +26,7 @@ Four additions for render machines, all read-only like before. Draft: the versio
 - History lists marked jobs; the automatic GPU session recorded for the same work is dropped (marked job wins, also in `get_history` and while running). Long names wrap instead of being cut.
 - A crash report that says "nothing to do" in its verdict does not repeat it in the card.
 - `get_process_vram`: `avg_mb` is the average over the time the process was running (`running_s`), not over the whole window.
+- Job reports: the lowest PCIe link counts only readings under load. The idle power-saving link (Gen1/Gen2) just before a job, still read in its first 100 ms samples, made a full-speed job read "Between Gen2 x16 and Gen5 x16" (live test on the RTX 5080, 29 Oct). Reports saved by the 1.2 test builds are revised on load (no degraded event: the lowest under load is the best link).
 
 **Fast sampling (100 ms) for the moments before a stop**
 - A small thread of its own reads the SM and memory clocks, power and power limit, temperature, GPU load, the clock-limit (throttle) reasons and the PCIe link every 100 ms (`fast_ms`, 50-1000) into a second fixed-size ring next to the flight recorder: `blackbox/fast_a.bin` / `fast_b.bin` (`TACHYFS1`, 40-byte records with a checksum), 15 minutes by default (`fast_minutes`, 1-60), about 352 KB per session. Written every second, flushed every 5 s, so a power cut loses at most a few seconds. `fast_sampling = false` turns it off.
@@ -45,7 +46,7 @@ Four additions for render machines, all read-only like before. Draft: the versio
 
 **Render job markers**
 - `tachyon mark start --job NAME` and `tachyon mark end --job NAME` append one line to `markers/markers.jsonl` in the data folder and exit (0 written, 1 could not write, 2 wrong arguments; the line is printed to the console it was started from). Nothing else is touched.
-- The running Tachyon follows the file and builds a report per job: duration, average and peak GPU load, memory controller load, VRAM at start / peak / end, average and peak power (100 ms), energy (and cost with `price_per_kwh`), temperature, SM clock range, seconds clock-limited by power and by heat and at the power limit, the clock-limit reasons, the PCIe link at start and end, the lowest seen and degraded events, the processes holding the most VRAM and the most common bottleneck. Jobs started before Tachyon was running are picked up (with `covered_s` saying how much was recorded); a job with no end marker is closed after 48 h; at most 16 open.
+- The running Tachyon follows the file and builds a report per job: duration, average and peak GPU load, memory controller load, VRAM at start / peak / end, average and peak power (100 ms), energy (and cost with `price_per_kwh`), temperature, SM clock range, seconds clock-limited by power and by heat and at the power limit, the clock-limit reasons, the PCIe link at start and end, the lowest under load and degraded events, the processes holding the most VRAM and the most common bottleneck. Jobs started before Tachyon was running are picked up (with `covered_s` saying how much was recorded); a job with no end marker is closed after 48 h; at most 16 open.
 - Reports go to `history/marked_jobs.jsonl`; `get_status.marked_jobs` (open, last, notes) and the new read-only MCP tool `get_job_reports` (`n`, `name`). The MCP server stays read-only: it never writes markers.
 
 **Measured on the RTX 5080 (Windows 11, 32 threads), whole Tachyon process, companion mode, 60 s windows**
@@ -54,7 +55,7 @@ Four additions for render machines, all read-only like before. Draft: the versio
 - After Tachyon was killed, the fast ring's last reading was 0.35 s before the kill (the 1 s recorder's last sample 4.4 s before).
 
 **Build and tests**
-- 182 tests on Linux and 186 under wine (169 and 172 in 1.1.0): the fast ring (wrap-around, damaged records, the thread writing and stopping), the last-seconds summary and hints, the link states (idle dance, degraded width and generation, recovery), the per-process VRAM log and summary, the marker CLI and job reports, the three new MCP tools and `diagnose_crash` with 100 ms data.
+- 198 tests on Linux and 202 under wine (169 and 172 in 1.1.0): status scale and percentage rule, same-job comparison, marked jobs over automatic sessions, the lowest PCIe link under load only (the real 29 Oct A2 pattern), the fast ring (wrap-around, damaged records, the thread writing and stopping), the last-seconds summary and hints, the link states (idle dance, degraded width and generation, recovery), the per-process VRAM log and summary, the marker CLI and job reports, the three new MCP tools and `diagnose_crash` with 100 ms data.
 
 ## v1.1.0
 

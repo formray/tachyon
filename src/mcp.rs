@@ -1590,7 +1590,13 @@ mod tests {
         assert_eq!(r["diagnosis"]["causes"][0]["suspect"], "power_cut", "{r:#}");
         // the whole day, and no `around` (latest restart)
         let day = local_text(last, "%Y-%m-%d");
-        for a in [json!({ "around": day }), json!({ "days": 1 })] {
+        // no `around`: the last N days count back from the real clock, so N reaches 26 Oct
+        let days = (crate::telemetry::now_ms() - last) / 86_400_000 + 2;
+        let mut asks = vec![json!({ "around": day })];
+        if days <= 60 {
+            asks.push(json!({ "days": days }));
+        }
+        for a in asks {
             let r = call(&mut f, a)["structuredContent"].clone();
             assert_eq!(r["source"], "event_log+flight_recorder", "{r:#}");
         }

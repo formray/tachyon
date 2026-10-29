@@ -1,4 +1,4 @@
-Tachyon 1.1.0
+Tachyon 1.2.0
 =============
 
 The lightest real-time GPU monitor for NVIDIA cards, and the one that explains
@@ -9,6 +9,21 @@ load, temperature, VRAM, power, clocks, fan, video encoder/decoder, PCIe
 traffic, what is limiting the clocks, and which programs are using the GPU
 (with the program that launched them and a category: Game, Creative app,
 Script/Python, Browser, AI/agent, System or Other).
+
+New in 1.2.0
+- Render job reports: a script calls "tachyon mark start --job NAME" and
+  "tachyon mark end --job NAME"; Tachyon reports the job (time, GPU load,
+  VRAM, power, energy, heat, PCIe link, which programs held VRAM) and compares
+  it with the previous run of the same job.
+- 100 ms fast sampling: after a crash, the last 30 seconds at ten readings
+  a second (power spikes, power brake, clock drops).
+- PCIe link history: idle power saving is normal; a slower or narrower link
+  under load is logged.
+- VRAM per process over time, the same numbers Task Manager shows.
+- Clearer reports: one verdict, one status (all fine / worth a look / act
+  now), details on demand.
+- Three new read-only agent tools: get_pcie_link, get_process_vram and
+  get_job_reports (twelve in all).
 
 New in 1.1.0
 - Will this job fit? When a render starts, Tachyon compares it with earlier
